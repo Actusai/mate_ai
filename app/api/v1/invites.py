@@ -3,36 +3,29 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from app.core.auth import get_db, get_current_user
+from app.core.scoping import require_admin_in_company, is_super
 from app.crud.invite import create_invite, accept_invite, get_invite_by_token
 from app.schemas.invite import InviteCreate, InviteOut, InviteAccept
 from app.models.user import User
 
 router = APIRouter()
 
-
-def _require_admin(user: User):
-    if user.role not in ("admin", "super_admin", "administrator_stranice"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Insufficient privileges",
-        )
-
-
 @router.post("/invites", response_model=InviteOut)
 def api_create_invite(
     payload: InviteCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _: None = Depends(require_admin_in_company),  # must be admin/super
 ):
-    # samo admini/super-admini smiju slati pozivnice
-    _require_admin(current_user)
+    # Non-super can invite only within own company
+    if not is_super(current_user) and payload.company_id != current_user.company_id:
+        raise HTTPException(status_code=403, detail="Cannot invite for another company.")
 
     try:
         invite = create_invite(db, payload)
         return invite
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
 
 @router.get("/invites/validate", response_model=InviteOut)
 def api_validate_invite(
@@ -42,15 +35,11 @@ def api_validate_invite(
     invite = get_invite_by_token(db, token)
     if not invite:
         raise HTTPException(status_code=400, detail="Invalid token")
-
     if invite.status != "pending":
         raise HTTPException(status_code=400, detail="Invite not pending")
-
     if invite.expires_at and invite.expires_at < datetime.utcnow():
         raise HTTPException(status_code=400, detail="Invite expired")
-
     return invite
-
 
 @router.post("/invites/accept")
 def api_accept_invite(

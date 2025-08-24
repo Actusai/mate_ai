@@ -1,52 +1,67 @@
 from app.db.session import SessionLocal
 from app.models.package import Package
-from app.db.base import Base
-from app.db.session import engine
 
-# Ensure tables are created
-Base.metadata.create_all(bind=engine)
-
-# Define package list
-packages = [
+AR_PACKAGES = [
     {
-        "name": "Basic",
-        "description": "1 AI system, no additional team members",
-        "price": 0,
-        "ai_system_limit": 1,
-        "user_limit": 1
+        "name": "AR Starter (1/1)",
+        "description": "All features. 1 client, 1 user.",
+        "price": 150.0,
+        "ai_system_limit": 0,
+        "user_limit": 1,
+        "client_limit": 1,
+        "is_ar_only": 1,
     },
     {
-        "name": "Standard",
-        "description": "Up to 3 AI systems and 3 team members",
-        "price": 49,
-        "ai_system_limit": 3,
-        "user_limit": 3
+        "name": "AR Basic",
+        "description": "All features. 5 clients, 3 users (AR + 2).",
+        "price": 500.0,
+        "ai_system_limit": 0,
+        "user_limit": 3,
+        "client_limit": 5,
+        "is_ar_only": 1,
     },
     {
-        "name": "Pro",
-        "description": "Up to 10 AI systems and 10 team members, advanced features",
-        "price": 99,
-        "ai_system_limit": 10,
-        "user_limit": 10
+        "name": "AR Standard",
+        "description": "All features. 10 clients, 7 users.",
+        "price": 1000.0,
+        "ai_system_limit": 0,
+        "user_limit": 7,
+        "client_limit": 10,
+        "is_ar_only": 1,
     },
     {
-        "name": "Enterprise",
-        "description": "Unlimited AI systems and users, includes all features and SLA",
-        "price": 199,
-        "ai_system_limit": -1,  # -1 = unlimited
-        "user_limit": -1
-    }
+        "name": "AR Pro",
+        "description": "All features. 25 clients, 15 users.",
+        "price": 2500.0,
+        "ai_system_limit": 0,
+        "user_limit": 15,
+        "client_limit": 25,
+        "is_ar_only": 1,
+    },
+    {
+        "name": "AR Enterprise",
+        "description": "All features. Unlimited clients & team. Custom pricing.",
+        "price": 0.0,   # custom
+        "ai_system_limit": 0,
+        "user_limit": 0,     # 0 = unlimited
+        "client_limit": 0,   # 0 = unlimited
+        "is_ar_only": 1,
+    },
 ]
 
-db = SessionLocal()
+def seed_ar_packages():
+    db = SessionLocal()
+    created = 0
+    try:
+        for data in AR_PACKAGES:
+            existing = db.query(Package).filter(Package.name == data["name"]).first()
+            if not existing:
+                db.add(Package(**data))
+                created += 1
+        db.commit()
+        print(f"✅ AR packages seeded (+{created} new).")
+    finally:
+        db.close()
 
-for p in packages:
-    exists = db.query(Package).filter(Package.name == p["name"]).first()
-    if not exists:
-        new_package = Package(**p)
-        db.add(new_package)
-
-db.commit()
-db.close()
-
-print("Packages successfully inserted.")
+if __name__ == "__main__":
+    seed_ar_packages()
