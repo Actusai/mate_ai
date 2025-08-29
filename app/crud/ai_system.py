@@ -2,7 +2,6 @@
 from typing import List, Optional, Sequence
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select
 
 from app.models.ai_system import AISystem
 from app.models.company import Company
@@ -64,6 +63,8 @@ def create_system(db: Session, payload: AISystemCreate) -> AISystem:
         status=payload.status,
         owner_user_id=payload.owner_user_id,
         notes=payload.notes,
+        # NEW: podrška za compliance_status (ako je poslan u payloadu)
+        compliance_status=getattr(payload, "compliance_status", None),
     )
     db.add(obj)
     db.commit()
@@ -76,6 +77,7 @@ def update_system(
     obj: AISystem,
     payload: AISystemUpdate,
 ) -> AISystem:
+    # ažuriramo samo polja koja su poslana (uključujući compliance_status)
     data = payload.model_dump(exclude_unset=True)
     for k, v in data.items():
         setattr(obj, k, v)

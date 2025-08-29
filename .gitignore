@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# Local dev artifacts
+*.db
+*.sqlite
+*.sqlite3
+.tables

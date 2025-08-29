@@ -1,8 +1,9 @@
 # app/schemas/ai_system.py
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field, conint, constr
+from pydantic import BaseModel, Field, conint, constr, computed_field
+
 
 # -----------------------------
 # CRUD schemas for AI Systems
@@ -11,10 +12,19 @@ class AISystemBase(BaseModel):
     name: constr(strip_whitespace=True, min_length=2, max_length=255)
     purpose: Optional[str] = None
     lifecycle_stage: Optional[constr(strip_whitespace=True, max_length=50)] = None
-    risk_tier: Optional[constr(strip_whitespace=True, max_length=50)] = None
+    risk_tier: Optional[constr(strip_whitespace=True, max_length=50)] = None  # npr. "high_risk", "minimal_risk", ...
     status: Optional[constr(strip_whitespace=True, max_length=50)] = None
     owner_user_id: Optional[conint(ge=1)] = None
     notes: Optional[str] = None
+
+    # ✅ Novo: dinamički status sukladnosti
+    # Dozvoljene vrijednosti ostavljamo eksplicitno radi konzistentnosti u klijentu
+    compliance_status: Optional[
+        Literal["compliant", "partially_compliant", "non_compliant", "unknown"]
+    ] = Field(
+        default="unknown",
+        description="Stanje usklađenosti AI sustava s obvezama (AI Act)."
+    )
 
 
 class AISystemCreate(AISystemBase):
@@ -30,12 +40,67 @@ class AISystemUpdate(BaseModel):
     owner_user_id: Optional[conint(ge=1)] = None
     notes: Optional[str] = None
 
+    # ✅ Novo: dopušten i update compliance statusa
+    compliance_status: Optional[
+        Literal["compliant", "partially_compliant", "non_compliant", "unknown"]
+    ] = None
+
 
 class AISystemOut(AISystemBase):
     id: int
     company_id: int
     created_at: datetime
     updated_at: datetime
+
+    # ✅ Novo: izvedena metrika – ne sprema se u DB; računa se iz risk_tier + compliance_status
+    @computed_field  # type: ignore[misc]
+    @property
+    def effective_risk_level(self) -> str:
+        """
+        Kombinira inherentni rizik (risk_tier) i stanje usklađenosti (compliance_status)
+        u "operativni" rizik koji prikazujemo na UI-ju.
+        """
+        tier = (self.risk_tier or "").lower().strip()
+        comp = (self.compliance_status or "unknown").lower().strip()
+
+        if tier == "prohibited":
+            return "prohibited_illegal"
+
+        if tier in {"high_risk", "high"}:
+            if comp == "compliant":
+                return "controlled_high_risk"
+            if comp == "partially_compliant":
+                return "elevated_high_risk"
+            if comp == "non_compliant":
+                return "critical_risk"
+            return "high_risk_unknown_compliance"
+
+        if tier in {"limited_risk", "limited"}:
+            if comp == "non_compliant":
+                return "elevated_limited_risk"
+            if comp == "partially_compliant":
+                return "managed_limited_risk"
+            if comp == "compliant":
+                return "limited_risk_compliant"
+            return "limited_risk_unknown_compliance"
+
+        if tier in {"minimal_risk", "minimal", "out_of_scope"}:
+            if comp == "non_compliant":
+                return "formal_breach_low_risk"
+            if comp == "partially_compliant":
+                return "managed_low_risk"
+            if comp == "compliant":
+                return "low_risk_compliant"
+            return "low_risk_unknown_compliance"
+
+        # Fallback ako je tier nepoznat
+        if comp == "non_compliant":
+            return "unknown_tier_non_compliant"
+        if comp == "partially_compliant":
+            return "unknown_tier_partially_compliant"
+        if comp == "compliant":
+            return "unknown_tier_compliant"
+        return "unknown_effective_risk"
 
     class Config:
         from_attributes = True
@@ -46,13 +111,11 @@ class AISystemOut(AISystemBase):
 # --------------------------------
 class RiskAssessmentAnswer(BaseModel):
     """
-    Flat booleans koje koristi risk_engine.py.
-    GET /assessment-sample može vam vratiti primjer (sve False).
+    Flat skup boolova koji koristi risk_engine.py.
     """
-
     # Scope / kontekst
-    is_ai_system: bool = True                     # čl. 3 definicija AI sustava
-    providers_outside_eu: bool = False           # za situacijske obveze (EU Authorized Rep)
+    is_ai_system: bool = True                 # čl. 3 – ako False -> out_of_scope
+    providers_outside_eu: bool = False        # dodaje situacijske obveze
 
     # Prohibited (Art. 5)
     subliminal_techniques: bool = False
@@ -60,7 +123,7 @@ class RiskAssessmentAnswer(BaseModel):
     social_scoring_public_authorities: bool = False
     real_time_remote_biometric_id_in_public_for_law_enforcement: bool = False
 
-    # High-risk (Annex III) – dopunjeno
+    # High-risk (Annex III)
     critical_infrastructure: bool = False
     employment_hr: bool = False
     education: bool = False
@@ -84,27 +147,20 @@ class RiskAssessmentAnswer(BaseModel):
 
 class RiskAssessmentRequest(BaseModel):
     """
-    Tijelo za POST /ai-systems/{system_id}/assessment
-
-    Primjer:
-    {
-      "answers": {
-        "content_generation_or_chatbot": true
-      }
-    }
+    Tijelo koje POST-aš na /ai-systems/{system_id}/assessment
     """
     answers: RiskAssessmentAnswer
 
 
 class RiskAssessmentResult(BaseModel):
     """
-    Odgovor procjene rizika.
-    - obligations: dict(category -> list)
-    - references: popis članaka/annexa
+    Odgovor evaluacije.
+    - obligations: map kategorija -> lista obveza
+    - references: kratke pravne reference (npr. 'Art. 9–15', 'Annex III')
     """
     system_id: int
     risk_tier: constr(strip_whitespace=True, to_lower=True, min_length=3, max_length=20)
     obligations: Dict[str, List[str]]
     rationale: List[str]
-    references: Optional[List[str]] = None
+    references: List[str] = []
     version: str = "1.1.0"

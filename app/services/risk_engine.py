@@ -10,13 +10,13 @@ PROHIBITED_KEYS = {
 }
 
 # -------- High-risk (Annex III) --------
-# Dopunjeno prema prijedlogu: dodani education_vocational_training, essential_private_services,
+# Dopunjeno: education_vocational_training, essential_private_services,
 # biometric_categorisation (kada NIJE zabranjeno), insurance_eligibility, border_control_ai_assist
 HIGH_RISK_FLAGS = {
     "critical_infrastructure",
     "employment_hr",
     "education",  # općenito obrazovanje
-    "education_vocational_training",  # posebno strukovno osposobljavanje
+    "education_vocational_training",  # strukovno osposobljavanje
     "law_enforcement",
     "migration_asylum_border",
     "border_control_ai_assist",
@@ -34,6 +34,36 @@ LIMITED_RISK_FLAGS = {
     "content_generation_or_chatbot",
     "deepfake_or_synthetic_media",
     "emotion_recognition_non_le",
+}
+
+# -------- Reference map (lagano orijentacijski članci/prilozi) --------
+FLAG_REFS: Dict[str, List[str]] = {
+    # Prohibited (Art. 5(1))
+    "subliminal_techniques": ["Art. 5(1)(a)"],
+    "exploits_vulnerabilities": ["Art. 5(1)(b)"],
+    "social_scoring_public_authorities": ["Art. 5(1)(c)"],
+    "real_time_remote_biometric_id_in_public_for_law_enforcement": ["Art. 5(1)(d)"],
+
+    # High-risk (Annex III – indikativno po točkama)
+    "critical_infrastructure": ["Annex III"],
+    "employment_hr": ["Annex III"],
+    "education": ["Annex III"],
+    "education_vocational_training": ["Annex III"],
+    "law_enforcement": ["Annex III"],
+    "migration_asylum_border": ["Annex III"],
+    "border_control_ai_assist": ["Annex III"],
+    "justice_democratic_processes": ["Annex III"],
+    "medical_device_or_care": ["Annex III"],
+    "biometric_identification_post": ["Annex III"],
+    "biometric_categorisation": ["Annex III"],
+    "credit_scoring_or_access_to_essential_services": ["Annex III"],
+    "essential_private_services": ["Annex III"],
+    "insurance_eligibility": ["Annex III"],
+
+    # Limited (Art. 52)
+    "content_generation_or_chatbot": ["Art. 52"],
+    "deepfake_or_synthetic_media": ["Art. 52"],
+    "emotion_recognition_non_le": ["Art. 52"],
 }
 
 def _collect_true_keys(answers: Dict[str, Any], keys: List[str]) -> List[str]:
@@ -54,16 +84,17 @@ def _limited_risk(answers: Dict[str, Any]) -> Tuple[bool, List[str]]:
 def _obligations_for_tier(tier: str, answers: Dict[str, Any]) -> Dict[str, List[str]]:
     """
     Vraća mapu kategorija -> lista obveza s kratkim referencama na AI Act.
+    Uvijek vraća i ključ 'situational' (može biti prazan).
     """
     tier = tier.lower()
 
-    # situacijske obveze (popunit ćemo dinamički)
+    # situacijske obveze (dodaju se kontekstualno)
     situational: List[str] = []
 
-    # ako je provider izvan EU -> ovlašteni predstavnik i EU kontakt
+    # Provider izvan EU -> ovlašteni predstavnik i EU kontakt
     if answers.get("providers_outside_eu") is True:
-        situational.append("Appoint EU Authorised Representative (provider outside EU) [Ch. 3 duties].")
-        situational.append("Provide EU contact in user notices / documentation.")
+        situational.append("Appoint EU Authorised Representative (provider outside the EU).")
+        situational.append("Provide EU contact in notices / documentation.")
 
     if tier == "prohibited":
         return {
@@ -101,7 +132,8 @@ def _obligations_for_tier(tier: str, answers: Dict[str, Any]) -> Dict[str, List[
     # minimal_risk
     return {"core": [], "situational": situational}
 
-def _references_for_tier(tier: str) -> List[str]:
+def _tier_references(tier: str) -> List[str]:
+    tier = tier.lower()
     if tier == "prohibited":
         return ["Art. 5"]
     if tier == "high_risk":
@@ -110,19 +142,34 @@ def _references_for_tier(tier: str) -> List[str]:
         return ["Art. 52"]
     return []
 
+def _flag_references(flags: List[str]) -> List[str]:
+    refs: List[str] = []
+    for f in flags:
+        refs.extend(FLAG_REFS.get(f, []))
+    # uniq + stabilan poredak
+    seen = set()
+    dedup: List[str] = []
+    for r in refs:
+        if r not in seen:
+            seen.add(r)
+            dedup.append(r)
+    return dedup
+
 def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Vraća:
+    Ulaz: dict s boolean poljima (flat).
+    Izlaz:
       {
         "risk_tier": "prohibited" | "high_risk" | "limited_risk" | "minimal_risk" | "out_of_scope",
         "obligations": { "core": [...], "situational": [...] },
         "rationale": [ ... ],
         "references": [ "Art. ..." ]
       }
+    Napomena: Prohibited ima prioritet; zatim high_risk; zatim limited_risk; inače minimal_risk.
+    Ako 'is_ai_system' == False -> out_of_scope.
     """
 
     # 0) Scope check – je li uopće "AI system" po čl. 3?
-    # (default True da ne rušimo stare pozive; postavi False ako želite izbaciti iz opsega)
     if answers.get("is_ai_system") is False:
         return {
             "risk_tier": "out_of_scope",
@@ -139,7 +186,7 @@ def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
             "risk_tier": tier,
             "obligations": _obligations_for_tier(tier, answers),
             "rationale": [f"Prohibited criteria matched: {', '.join(proh_hits)}"],
-            "references": _references_for_tier(tier),
+            "references": _tier_references(tier) + _flag_references(proh_hits),
         }
 
     # 2) High risk (Annex III)
@@ -150,7 +197,7 @@ def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
             "risk_tier": tier,
             "obligations": _obligations_for_tier(tier, answers),
             "rationale": [f"High-risk criteria matched: {', '.join(high_hits)}"],
-            "references": _references_for_tier(tier),
+            "references": _tier_references(tier) + _flag_references(high_hits),
         }
 
     # 3) Limited risk (Art. 52)
@@ -161,7 +208,7 @@ def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
             "risk_tier": tier,
             "obligations": _obligations_for_tier(tier, answers),
             "rationale": [f"Limited-risk criteria matched: {', '.join(lim_hits)}"],
-            "references": _references_for_tier(tier),
+            "references": _tier_references(tier) + _flag_references(lim_hits),
         }
 
     # 4) Minimal
@@ -172,3 +219,35 @@ def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
         "rationale": ["No prohibited/high/limited flags matched."],
         "references": [],
     }
+
+# ---------------------------------------------------------------------------
+# (Opcionalno, ali korisno) helper za “Effective Risk”
+# Ne mijenja DB; možeš ga koristiti u UI-ju ili odgovoru API-ja.
+# ---------------------------------------------------------------------------
+def calculate_effective_risk(risk_tier: str, compliance_status: str) -> str:
+    r = (risk_tier or "").lower()
+    c = (compliance_status or "").lower()
+
+    if r in {"prohibited"}:
+        return "prohibited"
+
+    if r in {"high_risk", "high-risk"}:
+        if c == "compliant":
+            return "controlled_high_risk"
+        if c == "partially_compliant":
+            return "elevated_high_risk"
+        return "critical_risk"  # non_compliant
+
+    if r in {"limited_risk", "limited-risk"}:
+        if c == "compliant":
+            return "limited_risk"
+        if c == "partially_compliant":
+            return "elevated_limited_risk"
+        return "formal_breach_low_impact"
+
+    # minimal_risk i ostalo
+    if c == "compliant":
+        return "minimal_risk"
+    if c == "partially_compliant":
+        return "elevated_minimal_risk"
+    return "formal_breach_low_impact"

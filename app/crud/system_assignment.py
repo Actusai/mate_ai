@@ -1,6 +1,8 @@
 # app/crud/system_assignment.py
-from typing import List, Optional
-from sqlalchemy.orm import Session
+from typing import List, Tuple, Optional
+from sqlalchemy.orm import Session, joinedload
+from app.models.system_assignment import SystemAssignment
+from app.models.user import User as UserModel
 
 from app.models.system_assignment import SystemAssignment
 
@@ -44,3 +46,31 @@ def delete_assignment(db: Session, obj: SystemAssignment) -> None:
 def get_assigned_system_ids_for_user(db: Session, user_id: int) -> List[int]:
     rows = db.query(SystemAssignment.ai_system_id).filter(SystemAssignment.user_id == user_id).all()
     return [sid for (sid,) in rows]
+
+# NOVO: lista assignmenta s učitanim User objektom (za jedan AI sustav)
+def get_assignments_with_user_for_system(
+    db: Session, ai_system_id: int
+) -> List[Tuple[SystemAssignment, UserModel]]:
+    rows = (
+        db.query(SystemAssignment, UserModel)
+        .join(UserModel, UserModel.id == SystemAssignment.user_id)
+        .filter(SystemAssignment.ai_system_id == ai_system_id)
+        .order_by(SystemAssignment.id.desc())
+        .all()
+    )
+    return rows
+
+# NOVO: jedan assignment s userom (npr. za povrat nakon create)
+def get_assignment_with_user(
+    db: Session, user_id: int, ai_system_id: int
+) -> Optional[Tuple[SystemAssignment, UserModel]]:
+    row = (
+        db.query(SystemAssignment, UserModel)
+        .join(UserModel, UserModel.id == SystemAssignment.user_id)
+        .filter(
+            SystemAssignment.user_id == user_id,
+            SystemAssignment.ai_system_id == ai_system_id,
+        )
+        .first()
+    )
+    return row
