@@ -15,6 +15,7 @@ from app.models.user import User
 from app.models.company import Company
 from app.models.admin_assignment import AdminAssignment
 from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyOut
+from app.schemas.user import UserOut  # NOVO za members list
 from app.crud.company import (
     get_company as crud_get_company,
     create_company as crud_create_company,
@@ -100,6 +101,10 @@ def create_company_endpoint(
     if not is_super(current_user):
         raise HTTPException(status_code=403, detail="Insufficient privileges")
 
+    # osiguraj da company_type mora biti poslan
+    if not payload.company_type:
+        raise HTTPException(status_code=422, detail="company_type is required")
+
     obj = crud_create_company(db, payload)
     return _to_out(obj)
 
@@ -134,6 +139,10 @@ def update_company_endpoint(
     if not can_write_company(db, current_user, company_id):
         raise HTTPException(status_code=403, detail="Insufficient privileges")
 
+    # company_type se također može ažurirati
+    if not payload.company_type:
+        raise HTTPException(status_code=422, detail="company_type is required")
+
     obj = crud_update_company(db, obj, payload)
     return _to_out(obj)
 
@@ -156,3 +165,63 @@ def delete_company_endpoint(
 
     crud_delete_company(db, obj)
     return
+
+
+# NOVO: endpoint za members liste
+@router.get("/companies/{company_id}/members", response_model=List[UserOut])
+def list_company_members(
+    company_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Vrati sve members za danu tvrtku.
+    - super_admin: može dohvatiti members bilo koje firme
+    - admin: može dohvatiti members samo vlastite firme
+    - member: nema pristup
+    """
+    obj = crud_get_company(db, company_id)
+    if not obj:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    if not (is_super(current_user) or can_read_company(db, current_user, company_id)):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    rows = db.query(User).filter(User.company_id == company_id, User.role == "member").all()
+    return [UserOut.model_validate(u) for u in rows]
+
+@router.get("/companies/{company_id}/members", response_model=List[UserOut])
+def list_company_members(
+    company_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Dozvola: admin/member vidi samo svoju firmu; super_admin sve
+    if not can_read_company(db, current_user, company_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Efikasno: jedan JOIN umjesto upita po korisniku
+    rows = (
+        db.query(
+            User.id,
+            User.email,
+            User.role,
+            User.company_id,
+            Company.name.label("company_name"),
+        )
+        .join(Company, User.company_id == Company.id, isouter=True)
+        .filter(User.company_id == company_id)
+        .order_by(User.id.asc())
+        .all()
+    )
+
+    return [
+        UserOut(
+            id=r.id,
+            email=r.email,
+            role=r.role,
+            company_id=r.company_id,
+            company_name=r.company_name,
+        )
+        for r in rows
+    ]

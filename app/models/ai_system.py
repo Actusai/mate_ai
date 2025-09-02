@@ -16,7 +16,8 @@ class AISystem(Base):
     __tablename__ = "ai_systems"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
+    company = relationship("Company", backref="ai_systems", passive_deletes=True)
 
     # osnovna meta polja
     name = Column(String(255), nullable=False, index=True)

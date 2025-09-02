@@ -1,6 +1,7 @@
 # app/main.py
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
+from fastapi.routing import APIRoute
 from fastapi.security import OAuth2PasswordBearer
 
 from app.db.session import engine
@@ -24,6 +25,11 @@ from app.api.v1 import system_assignments
 from app.api.v1 import me
 from app.api.v1 import dashboard
 from app.api.v1 import assessments
+from app.api.v1 import compliance_tasks
+from app.api.v1 import packages as packages_api
+from app.api.v1 import company_packages as company_packages_api
+# (Ako imaš admin varijantu paketa, uključi je po potrebi)
+# from app.api.v1 import packages as packages_admin
 
 # --- CREATE TABLES (idempotentno; redoslijed zbog FK!) ---
 user.Base.metadata.create_all(bind=engine)               # users
@@ -40,14 +46,32 @@ system_assignment.Base.metadata.create_all(bind=engine)  # system_assignments (F
 ai_assessment.Base.metadata.create_all(bind=engine)      # ai_assessments (FK -> users/ai_systems)
 
 # --- APP ---
-app = FastAPI(title="Mate AI")
+def generate_unique_id(route: APIRoute) -> str:
+    """
+    Stabilno generira unikatni operationId iz: tag + HTTP metoda + path.
+    Time izbjegavamo FastAPI warninge o duplikatima.
+    """
+    method = sorted(route.methods)[0].lower() if route.methods else "get"
+    tag = (route.tags[0] if route.tags else "default").lower()
+    path = route.path.replace("/", "_").replace("{", "").replace("}", "")
+    return f"{tag}.{method}{path}".strip("._")
+
+app = FastAPI(
+    title="Mate AI",
+    generate_unique_id_function=generate_unique_id
+)
 
 # --- MOUNT ROUTERS ---
 app.include_router(auth.router,               prefix="/api/v1", tags=["auth"])
 app.include_router(passwords_public.router,   prefix="/api/v1", tags=["auth"])
 app.include_router(passwords.router,          prefix="/api/v1", tags=["auth"])
 app.include_router(invites.router,            prefix="/api/v1", tags=["invites"])
+
+# ⚠️ VAŽNO: catalog router uključujemo SAMO JEDNOM.
+# Preporuka: u app/api/v1/catalog.py postavi `router = APIRouter(prefix="/catalog", tags=["catalog"])`
+# pa će rute biti /api/v1/catalog/companies i /api/v1/catalog/packages
 app.include_router(catalog.router,            prefix="/api/v1", tags=["catalog"])
+
 app.include_router(users.router,              prefix="/api/v1", tags=["users"])
 app.include_router(companies_api.router,      prefix="/api/v1", tags=["companies"])
 app.include_router(admin_assignments.router,  prefix="/api/v1", tags=["admin_assignments"])
@@ -56,11 +80,20 @@ app.include_router(system_assignments.router, prefix="/api/v1", tags=["system_as
 app.include_router(me.router,                 prefix="/api/v1", tags=["me"])
 app.include_router(dashboard.router,          prefix="/api/v1", tags=["dashboard"])
 app.include_router(assessments.router,        prefix="/api/v1", tags=["assessments"])
+app.include_router(compliance_tasks.router,   prefix="/api/v1", tags=["compliance_tasks"])
+app.include_router(packages_api.router,       prefix="/api/v1", tags=["packages"])
+app.include_router(company_packages_api.router, prefix="/api/v1", tags=["company-packages"])
+# Ne duplirati catalog.router niti companies router!
 
 # --- OpenAPI security scheme (samo schema; ne forsira globalno) ---
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login")
 
 def custom_openapi():
+    """
+    Zadržavamo tvoj custom OpenAPI:
+      - postavlja OAuth2PasswordBearer security scheme
+      - fallback deduplikacija operationId (ako bi se igdje ipak potkrao duplikat)
+    """
     if app.openapi_schema:
         return app.openapi_schema
 
@@ -78,7 +111,7 @@ def custom_openapi():
         "flows": {"password": {"tokenUrl": "/api/v1/login", "scopes": {}}}
     }
 
-    # --- De-duplicate operationId values (rješava FastAPI upozorenje) ---
+    # --- Fallback de-dup operationId (trebao bi rijetko biti potreban s generate_unique_id_function) ---
     seen = {}
     for path, methods in openapi_schema.get("paths", {}).items():
         for method, operation in methods.items():
@@ -92,11 +125,7 @@ def custom_openapi():
 
             if op_id in seen:
                 tag = (operation.get("tags") or [""])[0]
-                safe_tag = "".join(
-                    c for c in tag.lower().replace(" ", "_")
-                    if c.isalnum() or c in {"_", "-"}
-                )
-                # stabilan sufiks: /path → path bez kosih crta
+                safe_tag = "".join(c for c in tag.lower().replace(" ", "_") if c.isalnum() or c in {"_", "-"})
                 path_suffix = "".join(ch for ch in path.replace("/", "_") if ch.isalnum() or ch in {"_", "-"})
                 new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}"
                 counter = 2
