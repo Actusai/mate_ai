@@ -3,8 +3,8 @@ from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index
 from sqlalchemy.orm import relationship
 
-# Koristimo isti Base kao i ostali modeli
-from app.models.user import Base  # Base je već definiran u user.py
+# U ovom projektu Base dolazi iz user.py (zajednički metadata)
+from app.models.user import Base
 from app.models.company import Company
 from app.models.user import User
 
@@ -16,8 +16,13 @@ class AISystem(Base):
     __tablename__ = "ai_systems"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
-    company = relationship("Company", backref="ai_systems", passive_deletes=True)
+
+    company_id = Column(
+        Integer,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     # osnovna meta polja
     name = Column(String(255), nullable=False, index=True)
@@ -25,9 +30,19 @@ class AISystem(Base):
     lifecycle_stage = Column(String(50), nullable=True)   # npr. "development", "production"
     risk_tier = Column(String(50), nullable=True)         # npr. "prohibited", "high_risk", "limited_risk", "minimal_risk"
     status = Column(String(50), nullable=True)            # npr. "active", "paused", "retired"
-    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # odgovorna osoba
 
-    # 🔹 NOVO: dinamička usklađenost (ne mijenja postojeće funkcionalnosti)
+    # vlasnik sustava
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # 🔹 NOVO: AR (Authorized Representative)
+    authorized_representative_user_id = Column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    # 🔹 Dinamička usklađenost (ne mijenja postojeće funkcionalnosti)
     #   - compliance_status: "unknown" | "compliant" | "partially_compliant" | "non_compliant"
     #   - compliance_score: 0–100 (opcionalno; npr. % ispunjenih obveza)
     #   - compliance_updated_at: kada je zadnji put ažurirano
@@ -40,13 +55,18 @@ class AISystem(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    # relacije (opcionalno, ali korisno)
-    company = relationship(Company, backref="ai_systems")
+    # relacije
+    company = relationship(Company, backref="ai_systems", passive_deletes=True)
     owner = relationship(User, foreign_keys=[owner_user_id])
+    authorized_representative = relationship(
+        User, foreign_keys=[authorized_representative_user_id]
+    )
 
     __table_args__ = (
         # Koristan složeni indeks za listanje/filtriranje po company & compliance
         Index("ix_ai_systems_company_compliance", "company_id", "compliance_status"),
+        # Koristan indeks za pretrage po AR-u unutar kompanije
+        Index("ix_ai_systems_company_ar", "company_id", "authorized_representative_user_id"),
     )
 
     # Pomoćna property: kombinira risk_tier + compliance_status u efektivni rizik

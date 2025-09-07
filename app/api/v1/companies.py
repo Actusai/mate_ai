@@ -1,7 +1,7 @@
 # app/api/v1/companies.py
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_db, get_current_user
@@ -15,13 +15,14 @@ from app.models.user import User
 from app.models.company import Company
 from app.models.admin_assignment import AdminAssignment
 from app.schemas.company import CompanyCreate, CompanyUpdate, CompanyOut
-from app.schemas.user import UserOut  # NOVO za members list
+from app.schemas.user import UserOut  # za members list
 from app.crud.company import (
     get_company as crud_get_company,
     create_company as crud_create_company,
     update_company as crud_update_company,
     delete_company as crud_delete_company,
 )
+from app.services.audit import audit_log, ip_from_request  # AUDIT
 
 router = APIRouter()
 
@@ -32,17 +33,17 @@ def _to_out(c: Company) -> CompanyOut:
 
 def _visible_company_ids_for_user(db: Session, current_user: User) -> list[int]:
     """
-    Visible IDs for non-super users:
-      - member: own company only
-      - client admin: own company only
-      - staff admin (e.g. 'administrator_stranice'/'site_admin'): own + assigned
-    Super-admin is handled separately (no filter).
+    Vidljivi ID-evi za non-super korisnike:
+      - member: vlastita tvrtka
+      - client admin: vlastita tvrtka
+      - staff admin: vlastita + dodijeljene u AdminAssignment
+    Super-admin je zasebno obrađen (bez filtera).
     """
     ids = set()
     if current_user.company_id:
         ids.add(current_user.company_id)
 
-    if is_admin(current_user):  # includes staff admins
+    if is_admin(current_user):  # uključuje staff admine
         assigned = (
             db.query(AdminAssignment.company_id)
             .filter(AdminAssignment.admin_id == current_user.id)
@@ -61,8 +62,8 @@ def list_companies(
     limit: int = Query(50, ge=1, le=200),
 ):
     """
-    super_admin: returns all companies (paginated)
-    admin/member: returns only visible companies (own; staff admins also assigned)
+    super_admin: vraća sve kompanije (paginirano)
+    admin/member: vraća samo vidljive kompanije (vlastitu; staff admin i dodijeljene)
     """
     if is_super(current_user):
         rows = (
@@ -94,18 +95,35 @@ def create_company_endpoint(
     payload: CompanyCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    request: Request = None,
 ):
     """
-    Only super_admin can create tenancy (new clients).
+    Samo super_admin može kreirati tenancy (nove klijente).
     """
     if not is_super(current_user):
         raise HTTPException(status_code=403, detail="Insufficient privileges")
 
-    # osiguraj da company_type mora biti poslan
     if not payload.company_type:
         raise HTTPException(status_code=422, detail="company_type is required")
 
     obj = crud_create_company(db, payload)
+
+    # AUDIT (best-effort)
+    try:
+        audit_log(
+            db,
+            company_id=obj.id,
+            user_id=getattr(current_user, "id", None),
+            action="COMPANY_CREATED",
+            entity_type="company",
+            entity_id=obj.id,
+            meta={"name": obj.name, "company_type": obj.company_type, "status": obj.status},
+            ip=ip_from_request(request),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
     return _to_out(obj)
 
 
@@ -131,6 +149,7 @@ def update_company_endpoint(
     payload: CompanyUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    request: Request = None,
 ):
     obj = crud_get_company(db, company_id)
     if not obj:
@@ -139,11 +158,30 @@ def update_company_endpoint(
     if not can_write_company(db, current_user, company_id):
         raise HTTPException(status_code=403, detail="Insufficient privileges")
 
-    # company_type se također može ažurirati
     if not payload.company_type:
         raise HTTPException(status_code=422, detail="company_type is required")
 
+    # Snapshot promjena za audit (prije update-a)
+    changes = payload.model_dump(exclude_unset=True)
+
     obj = crud_update_company(db, obj, payload)
+
+    # AUDIT (best-effort)
+    try:
+        audit_log(
+            db,
+            company_id=obj.id,
+            user_id=getattr(current_user, "id", None),
+            action="COMPANY_UPDATED",
+            entity_type="company",
+            entity_id=obj.id,
+            meta={"changes": changes},
+            ip=ip_from_request(request),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
     return _to_out(obj)
 
 
@@ -152,6 +190,7 @@ def delete_company_endpoint(
     company_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    request: Request = None,
 ):
     """
     For safety, deletion stays restricted to super_admin.
@@ -163,11 +202,34 @@ def delete_company_endpoint(
     if not obj:
         raise HTTPException(status_code=404, detail="Company not found")
 
+    # Meta prije brisanja (za audit)
+    meta_snapshot = {
+        "name": obj.name,
+        "company_type": obj.company_type,
+        "status": obj.status,
+    }
+
     crud_delete_company(db, obj)
-    return
+
+    # AUDIT (best-effort)
+    try:
+        audit_log(
+            db,
+            company_id=company_id,
+            user_id=getattr(current_user, "id", None),
+            action="COMPANY_DELETED",
+            entity_type="company",
+            entity_id=company_id,
+            meta=meta_snapshot,
+            ip=ip_from_request(request),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-# NOVO: endpoint za members liste
 @router.get("/companies/{company_id}/members", response_model=List[UserOut])
 def list_company_members(
     company_id: int,
@@ -175,10 +237,10 @@ def list_company_members(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Vrati sve members za danu tvrtku.
+    Vrati sve članove (users) za danu tvrtku.
     - super_admin: može dohvatiti members bilo koje firme
-    - admin: može dohvatiti members samo vlastite firme
-    - member: nema pristup
+    - admin/staff admin (assigned): može dohvatiti members svoje / dodijeljene firme (can_read_company rješava)
+    - običan member: nema pristup tuđim firmama
     """
     obj = crud_get_company(db, company_id)
     if not obj:
@@ -187,20 +249,6 @@ def list_company_members(
     if not (is_super(current_user) or can_read_company(db, current_user, company_id)):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    rows = db.query(User).filter(User.company_id == company_id, User.role == "member").all()
-    return [UserOut.model_validate(u) for u in rows]
-
-@router.get("/companies/{company_id}/members", response_model=List[UserOut])
-def list_company_members(
-    company_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # Dozvola: admin/member vidi samo svoju firmu; super_admin sve
-    if not can_read_company(db, current_user, company_id):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    # Efikasno: jedan JOIN umjesto upita po korisniku
     rows = (
         db.query(
             User.id,
