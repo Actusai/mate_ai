@@ -6,8 +6,8 @@ class CompanyPackage(Base):
     __tablename__ = "company_packages"
 
     id = Column(Integer, primary_key=True, index=True)
-    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
-    package_id = Column(Integer, ForeignKey("packages.id"), nullable=False)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
+    package_id = Column(Integer, ForeignKey("packages.id", ondelete="RESTRICT"), nullable=False)
     start_date = Column(DateTime, default=datetime.utcnow)
     end_date = Column(DateTime, nullable=True)
     is_active = Column(Boolean, default=True)
