@@ -1,20 +1,37 @@
 # app/main.py
+from __future__ import annotations
+
+import os
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.security import OAuth2PasswordBearer
 
 from app.db.session import engine
 
-# --- MODELS (redoslijed je bitan zbog FK ovisnosti) ---
-# users -> companies -> packages -> company_package -> invites -> password_reset
-# ai_systems (FK -> companies/users) -> admin_assignment (FK -> users/companies)
-# system_assignment (FK -> users/ai_systems) -> ai_assessment (FK -> users/ai_systems, users)
+# ---------------------------
+# MODELS (order matters due to FKs)
+# ---------------------------
 from app.models import user, company, package, company_package, invite
-from app.models import password_reset, ai_system, admin_assignment
-from app.models import system_assignment
-from app.models import ai_assessment  # kreira se tek nakon users/ai_systems
+from app.models import password_reset, ai_system, admin_assignment, system_assignment
+from app.models import ai_assessment
 
-# --- ROUTERS ---
+# Optional models (import safely; skip if missing)
+for _mod in (
+    "incident",
+    "notification",
+    "document",
+    "task_stats",
+    "assessment_approval",
+    "regulatory_deadline",
+):
+    try:
+        __import__(f"app.models.{_mod}")  # registers table classes on the shared Base
+    except Exception:
+        pass
+
+# ---------------------------
+# ROUTERS (core)
+# ---------------------------
 from app.api.v1 import auth, invites, catalog, users
 from app.api.v1 import passwords_public, passwords
 from app.api.v1 import companies as companies_api
@@ -25,24 +42,55 @@ from app.api.v1 import me
 from app.api.v1 import dashboard
 from app.api.v1 import assessments
 
-# --- CREATE TABLES (idempotentno; redoslijed zbog FK!) ---
-user.Base.metadata.create_all(bind=engine)               # users
-company.Base.metadata.create_all(bind=engine)            # companies
-package.Base.metadata.create_all(bind=engine)            # packages
-company_package.Base.metadata.create_all(bind=engine)    # junction
-invite.Base.metadata.create_all(bind=engine)             # invites
-password_reset.Base.metadata.create_all(bind=engine)     # password_resets
 
-ai_system.Base.metadata.create_all(bind=engine)          # ai_systems  (FK -> companies/users)
-admin_assignment.Base.metadata.create_all(bind=engine)   # admin_assignments (FK -> users/companies)
-system_assignment.Base.metadata.create_all(bind=engine)  # system_assignments (FK -> users/ai_systems)
+def _try_import_router(module_path: str):
+    """Import a FastAPI router from module_path if present, else return None."""
+    try:
+        mod = __import__(module_path, fromlist=["router"])
+        return getattr(mod, "router", None)
+    except Exception:
+        return None
 
-ai_assessment.Base.metadata.create_all(bind=engine)      # ai_assessments (FK -> users/ai_systems)
 
-# --- APP ---
+# Optional routers (loaded only if modules exist)
+incidents_router = _try_import_router("app.api.v1.incidents")
+notifications_router = _try_import_router("app.api.v1.notifications")
+documents_router = _try_import_router("app.api.v1.documents")  # mounted only once here
+reports_router = _try_import_router("app.api.v1.reports")
+audit_logs_router = _try_import_router("app.api.v1.audit_logs")
+health_router = _try_import_router("app.api.health")
+
+# ---------------------------
+# CREATE TABLES (idempotent)
+# ---------------------------
+user.Base.metadata.create_all(bind=engine)
+company.Base.metadata.create_all(bind=engine)
+package.Base.metadata.create_all(bind=engine)
+company_package.Base.metadata.create_all(bind=engine)
+invite.Base.metadata.create_all(bind=engine)
+password_reset.Base.metadata.create_all(bind=engine)
+
+ai_system.Base.metadata.create_all(bind=engine)
+admin_assignment.Base.metadata.create_all(bind=engine)
+system_assignment.Base.metadata.create_all(bind=engine)
+
+ai_assessment.Base.metadata.create_all(bind=engine)
+
+# If a unified Base exists (e.g., app.db.base.Base), also create_all on it
+try:
+    from app.db.base import Base as DBBase
+    DBBase.metadata.create_all(bind=engine)
+except Exception:
+    pass
+
+# ---------------------------
+# APP
+# ---------------------------
 app = FastAPI(title="Mate AI")
 
-# --- MOUNT ROUTERS ---
+# ---------------------------
+# ROUTER MOUNT
+# ---------------------------
 app.include_router(auth.router,               prefix="/api/v1", tags=["auth"])
 app.include_router(passwords_public.router,   prefix="/api/v1", tags=["auth"])
 app.include_router(passwords.router,          prefix="/api/v1", tags=["auth"])
@@ -57,7 +105,50 @@ app.include_router(me.router,                 prefix="/api/v1", tags=["me"])
 app.include_router(dashboard.router,          prefix="/api/v1", tags=["dashboard"])
 app.include_router(assessments.router,        prefix="/api/v1", tags=["assessments"])
 
-# --- OpenAPI security scheme (samo schema; ne forsira globalno) ---
+# Optional routers (only if present)
+if documents_router:
+    app.include_router(documents_router,      prefix="/api/v1", tags=["documents"])
+if incidents_router:
+    app.include_router(incidents_router,      prefix="/api/v1", tags=["incidents"])
+if notifications_router:
+    app.include_router(notifications_router,  prefix="/api/v1", tags=["notifications"])
+if reports_router:
+    app.include_router(reports_router,        prefix="/api/v1", tags=["reports"])
+if audit_logs_router:
+    app.include_router(audit_logs_router,     prefix="/api/v1", tags=["audit"])
+if health_router:
+    app.include_router(health_router,         prefix="/api",    tags=["health"])
+
+# ---------------------------
+# Scheduler (daily reminders) – optional & safe
+# ---------------------------
+try:
+    from app.worker.scheduler import make_scheduler  # provided earlier
+except Exception:
+    make_scheduler = None  # type: ignore
+
+@app.on_event("startup")
+def _start_scheduler():
+    # Enable with ENABLE_SCHEDULER=1 (default 1). Time configured in worker/scheduler.py via env.
+    if make_scheduler and os.getenv("ENABLE_SCHEDULER", "1") == "1":
+        try:
+            app.state.scheduler = make_scheduler()
+            app.state.scheduler.start()
+        except Exception:
+            app.state.scheduler = None  # keep API running if scheduler fails
+
+@app.on_event("shutdown")
+def _stop_scheduler():
+    sched = getattr(app.state, "scheduler", None)
+    if sched:
+        try:
+            sched.shutdown(wait=False)
+        except Exception:
+            pass
+
+# ---------------------------
+# OpenAPI (dedupe operationId)
+# ---------------------------
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login")
 
 def custom_openapi():
@@ -71,38 +162,36 @@ def custom_openapi():
         routes=app.routes,
     )
 
-    # Security scheme
     openapi_schema.setdefault("components", {}).setdefault("securitySchemes", {})
     openapi_schema["components"]["securitySchemes"]["OAuth2PasswordBearer"] = {
         "type": "oauth2",
         "flows": {"password": {"tokenUrl": "/api/v1/login", "scopes": {}}}
     }
 
-    # --- De-duplicate operationId values (rješava FastAPI upozorenje) ---
     seen = {}
     for path, methods in openapi_schema.get("paths", {}).items():
         for method, operation in methods.items():
             m = method.lower()
             if m not in {"get", "post", "put", "patch", "delete", "options", "head"}:
                 continue
-
             op_id = operation.get("operationId")
             if not op_id:
                 continue
-
             if op_id in seen:
                 tag = (operation.get("tags") or [""])[0]
                 safe_tag = "".join(
                     c for c in tag.lower().replace(" ", "_")
                     if c.isalnum() or c in {"_", "-"}
                 )
-                # stabilan sufiks: /path → path bez kosih crta
-                path_suffix = "".join(ch for ch in path.replace("/", "_") if ch.isalnum() or ch in {"_", "-"})
+                path_suffix = "".join(
+                    ch for ch in path.replace("/", "_")
+                    if ch.isalnum() or ch in {"_", "-"}
+                )
                 new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}"
-                counter = 2
+                n = 2
                 while new_id in seen:
-                    new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}_{counter}"
-                    counter += 1
+                    new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}_{n}"
+                    n += 1
                 operation["operationId"] = new_id
                 seen[new_id] = (path, method)
             else:

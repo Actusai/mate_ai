@@ -1,7 +1,7 @@
 # app/api/v1/companies.py
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Response
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_db, get_current_user
@@ -34,8 +34,8 @@ def _visible_company_ids_for_user(db: Session, current_user: User) -> list[int]:
     Visible IDs for non-super users:
       - member: own company only
       - client admin: own company only
-      - staff admin (e.g. 'administrator_stranice'/'site_admin'): own + assigned
-    Super-admin is handled separately (no filter).
+      - staff admin: own + assigned
+    Super admin is handled separately (no filter).
     """
     ids = set()
     if current_user.company_id:
@@ -52,7 +52,11 @@ def _visible_company_ids_for_user(db: Session, current_user: User) -> list[int]:
     return list(ids)
 
 
-@router.get("/companies", response_model=List[CompanyOut])
+@router.get(
+    "/companies",
+    response_model=List[CompanyOut],
+    operation_id="companies_list_v1",
+)
 def list_companies(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -88,7 +92,12 @@ def list_companies(
     return [_to_out(r) for r in rows]
 
 
-@router.post("/companies", response_model=CompanyOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/companies",
+    response_model=CompanyOut,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="companies_create_v1",
+)
 def create_company_endpoint(
     payload: CompanyCreate,
     db: Session = Depends(get_db),
@@ -104,7 +113,11 @@ def create_company_endpoint(
     return _to_out(obj)
 
 
-@router.get("/companies/{company_id}", response_model=CompanyOut)
+@router.get(
+    "/companies/{company_id}",
+    response_model=CompanyOut,
+    operation_id="companies_get_v1",
+)
 def get_company_endpoint(
     company_id: int,
     db: Session = Depends(get_db),
@@ -120,7 +133,11 @@ def get_company_endpoint(
     return _to_out(obj)
 
 
-@router.put("/companies/{company_id}", response_model=CompanyOut)
+@router.put(
+    "/companies/{company_id}",
+    response_model=CompanyOut,
+    operation_id="companies_update_v1",
+)
 def update_company_endpoint(
     company_id: int,
     payload: CompanyUpdate,
@@ -138,7 +155,11 @@ def update_company_endpoint(
     return _to_out(obj)
 
 
-@router.delete("/companies/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/companies/{company_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    operation_id="companies_delete_v1",
+)
 def delete_company_endpoint(
     company_id: int,
     db: Session = Depends(get_db),
@@ -155,4 +176,4 @@ def delete_company_endpoint(
         raise HTTPException(status_code=404, detail="Company not found")
 
     crud_delete_company(db, obj)
-    return
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
