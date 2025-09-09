@@ -1,5 +1,6 @@
 # app/crud/ai_system.py
 from typing import List, Optional, Sequence
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -54,18 +55,21 @@ def create_system(db: Session, payload: AISystemCreate) -> AISystem:
     if not company:
         raise ValueError("Company not found")
 
-    obj = AISystem(
-        company_id=payload.company_id,
-        name=payload.name,
-        purpose=payload.purpose,
-        lifecycle_stage=payload.lifecycle_stage,
-        risk_tier=payload.risk_tier,
-        status=payload.status,
-        owner_user_id=payload.owner_user_id,
-        notes=payload.notes,
-        # NEW: podrška za compliance_status (ako je poslan u payloadu)
-        compliance_status=getattr(payload, "compliance_status", None),
-    )
+    # Priprema podataka + default za compliance_status (DB kolona je NOT NULL)
+    data = payload.model_dump(exclude_none=True)
+    data.setdefault("compliance_status", "pending")
+
+    # (opcionalno) inicijalna aktivnost na kreiranju
+    if "last_activity_at" not in data:
+        data["last_activity_at"] = datetime.utcnow()
+
+    obj = AISystem(**data)
+
+    # Ako je eksplicitno poslan compliance_status ili compliance_score,
+    # možemo postaviti i timestamp za praćenje promjene
+    if "compliance_status" in data or "compliance_score" in data:
+        obj.compliance_updated_at = datetime.utcnow()
+
     db.add(obj)
     db.commit()
     db.refresh(obj)
@@ -77,10 +81,24 @@ def update_system(
     obj: AISystem,
     payload: AISystemUpdate,
 ) -> AISystem:
-    # ažuriramo samo polja koja su poslana (uključujući compliance_status)
+    # snimi stare vrijednosti za detekciju promjene
+    old_status = getattr(obj, "compliance_status", None)
+    old_score = getattr(obj, "compliance_score", None)
+
+    # ažuriramo samo poslana polja
     data = payload.model_dump(exclude_unset=True)
     for k, v in data.items():
         setattr(obj, k, v)
+
+    # ako se promijenio compliance_status ili compliance_score -> osvježi timestamp
+    new_status = getattr(obj, "compliance_status", None)
+    new_score = getattr(obj, "compliance_score", None)
+    if (new_status is not None and new_status != old_status) or (new_score is not None and new_score != old_score):
+        obj.compliance_updated_at = datetime.utcnow()
+
+    # svaka izmjena bilježi aktivnost
+    obj.last_activity_at = datetime.utcnow()
+
     db.add(obj)
     db.commit()
     db.refresh(obj)

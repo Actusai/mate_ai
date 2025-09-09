@@ -4,7 +4,7 @@ from typing import Dict, Any, List, Optional
 
 from pydantic import BaseModel, constr
 
-# Koristimo postojeći upitnik iz schemas.ai_system (isti kao /systems assessment)
+# Reuse the same questionnaire schema as in schemas.ai_system
 from app.schemas.ai_system import RiskAssessmentAnswer
 
 
@@ -13,10 +13,10 @@ from app.schemas.ai_system import RiskAssessmentAnswer
 # -----------------------------
 class AIAssessmentCreate(BaseModel):
     """
-    Payload za kreiranje (i po potrebi spremanje) nove verzije procjene.
-    - answers: skup boolean polja (isti kao u /ai-systems/{id}/assessment)
-    - version_tag: opcionalna oznaka (npr. 'v1', 'Q3-2025')
-    - save: ako je True, endpoint će trajno spremiti verziju
+    Payload to create (and optionally persist) a new assessment version.
+    - answers: set of boolean fields (same as /ai-systems/{id}/assessment)
+    - version_tag: optional label (e.g., 'v1', 'Q3-2025')
+    - save: if True, the endpoint will persist the version
     """
     answers: RiskAssessmentAnswer
     version_tag: Optional[constr(strip_whitespace=True, max_length=50)] = None
@@ -24,30 +24,35 @@ class AIAssessmentCreate(BaseModel):
 
 
 # -----------------------------
-# Response modeli
+# Response models
 # -----------------------------
 class AIAssessmentOut(BaseModel):
     """
-    Jedna verzija procjene koju vraća API.
-    Polja su usklađena s risk_engine outputom + metapodaci o verziji.
+    One assessment version returned by the API.
+    Fields align with risk_engine output + version metadata.
     """
     id: int
     system_id: int
     company_id: int
 
-    # rezultat klasifikacije
+    # classification result
     risk_tier: constr(strip_whitespace=True, to_lower=True, min_length=3, max_length=20)
-    obligations: Dict[str, List[str]]              # npr. {"core": [...], "situational": [...]}
-    rationale: List[str]                           # objašnjenja (zašto je u tom tieru)
-    references: List[str] = []                     # kratke reference (npr. "Art. 9–15", "Art. 52")
+    obligations: Dict[str, List[str]]              # e.g. {"core": [...], "situational": [...]}
+    rationale: List[str]                           # reasons for tier
+    references: List[str] = []                     # short references (e.g. "Art. 9–15", "Art. 52")
 
-    # snimka inputa
+    # snapshot of inputs
     answers: RiskAssessmentAnswer
 
-    # metapodaci o verziji
+    # version metadata
     version_tag: Optional[str] = None
     created_by: int
     created_at: datetime
+
+    # --- sign-off (optional, mirrored on the assessment row if present) ---
+    approved_by: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    approval_note: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -55,7 +60,7 @@ class AIAssessmentOut(BaseModel):
 
 class AIAssessmentListItem(BaseModel):
     """
-    Sažetak za liste – manji payload.
+    Slim list item representation (used in paginated lists).
     """
     id: int
     system_id: int
@@ -64,13 +69,18 @@ class AIAssessmentListItem(BaseModel):
     created_by: int
     created_at: datetime
 
+    # Optional sign-off preview for list screens
+    approved_by: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    approval_note: Optional[str] = None
+
     class Config:
         from_attributes = True
 
 
 class AIAssessmentDetail(BaseModel):
     """
-    Detaljan prikaz pojedine verzije (alternativa AIAssessmentOut).
+    Detailed view of one version (alternative to AIAssessmentOut).
     """
     id: int
     system_id: int
@@ -87,14 +97,18 @@ class AIAssessmentDetail(BaseModel):
     created_by: int
     created_at: datetime
 
+    # Optional sign-off information
+    approved_by: Optional[int] = None
+    approved_at: Optional[datetime] = None
+    approval_note: Optional[str] = None
+
     class Config:
         from_attributes = True
 
 
-# --- Diff output between two assessment versions ---
-from typing import Dict, Any, List, Optional
-from pydantic import BaseModel
-
+# -----------------------------
+# Diff output between two assessment versions
+# -----------------------------
 class AIAssessmentDiff(BaseModel):
     base_id: int
     compare_id: int
@@ -106,6 +120,6 @@ class AIAssessmentDiff(BaseModel):
 
     added: Dict[str, Any]
     removed: Dict[str, Any]
-    changed: Dict[str, Dict[str, Any]]  # { field: {"from": old, "to": new} }
+    changed: Dict[str, Dict[str, Any]]  # {field: {"from": old, "to": new}}
 
     summary: Dict[str, int]  # {"added": X, "removed": Y, "changed": Z}

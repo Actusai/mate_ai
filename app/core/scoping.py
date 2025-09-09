@@ -3,6 +3,7 @@ from typing import Any, Optional, List
 
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session, Query
+from sqlalchemy import text
 
 from app.core.auth import get_db, get_current_user
 from app.models.user import User
@@ -63,27 +64,52 @@ def is_assigned_admin(db: Session, current_user: User, company_id: int) -> bool:
     )
 
 # ---- Contributor → System assignment helpers --------------------------------
+def _is_member_of_system_sql(db: Session, user_id: int, system_id: int) -> bool:
+    """
+    Eksplicitno članstvo u AI sustavu:
+      - ai_system_members (nova tablica), ili
+      - system_assignments (postojeća tablica)
+    """
+    row = db.execute(
+        text("SELECT 1 FROM ai_system_members WHERE ai_system_id=:sid AND user_id=:uid LIMIT 1"),
+        {"sid": system_id, "uid": user_id},
+    ).fetchone()
+    if row:
+        return True
+
+    row = (
+        db.query(SystemAssignment)
+        .filter(SystemAssignment.user_id == user_id, SystemAssignment.ai_system_id == system_id)
+        .first()
+    )
+    return bool(row)
 
 def get_assigned_system_ids(db: Session, user_id: int) -> List[int]:
-    rows = (
-        db.query(SystemAssignment.ai_system_id)
+    """
+    Svi AI sustavi gdje je user član/pridružen:
+      - UNION system_assignments + ai_system_members
+    """
+    ids: set[int] = set(
+        sid for (sid,) in db.query(SystemAssignment.ai_system_id)
         .filter(SystemAssignment.user_id == user_id)
         .all()
     )
-    return [sid for (sid,) in rows]
+    # dodaj članstvo iz ai_system_members (ako tablica postoji)
+    try:
+        extra = db.execute(
+            text("SELECT ai_system_id FROM ai_system_members WHERE user_id=:uid"),
+            {"uid": user_id},
+        ).fetchall()
+        ids.update([row[0] for row in extra])
+    except Exception:
+        # ako tablica ne postoji u nekom okruženju, tiho ignoriraj
+        pass
+    return list(ids)
 
 def is_assigned_contributor(db: Session, current_user: User, system_id: int) -> bool:
     if not is_contributor(current_user):
         return False
-    return (
-        db.query(SystemAssignment)
-        .filter(
-            SystemAssignment.user_id == current_user.id,
-            SystemAssignment.ai_system_id == system_id,
-        )
-        .first()
-        is not None
-    )
+    return _is_member_of_system_sql(db, current_user.id, system_id)
 
 # ---- Hard guards (raise 403) -------------------------------------------------
 
@@ -137,7 +163,11 @@ def scope_query_to_admin_assignments(
     if is_super(current_user):
         return query
     if is_staff_admin(current_user) or is_client_admin(current_user):
-        company_ids = get_assigned_company_ids(db, current_user.id) if is_staff_admin(current_user) else [current_user.company_id]
+        company_ids = (
+            get_assigned_company_ids(db, current_user.id)
+            if is_staff_admin(current_user)
+            else [current_user.company_id]
+        )
         if not company_ids:
             return query.filter(False)
         return query.filter(company_field.in_(company_ids))
@@ -184,8 +214,8 @@ def can_read_system(db: Session, user: User, system: AISystem) -> bool:
     # staff admin → assigned to company
     if is_staff_admin(user) and is_assigned_admin(db, user, system.company_id):
         return True
-    # contributor → must be assigned to the system
-    if is_contributor(user) and is_assigned_contributor(db, user, system.id):
+    # contributor → assigned (system_assignments or ai_system_members)
+    if is_contributor(user) and _is_member_of_system_sql(db, user.id, system.id):
         return True
     # finally, non-admin non-contributor with same company? no.
     return False
@@ -204,6 +234,6 @@ def can_write_system_limited(db: Session, user: User, system: AISystem) -> bool:
     """Limited edit: full editors OR assigned contributor."""
     if can_write_system_full(db, user, system):
         return True
-    if is_contributor(user) and is_assigned_contributor(db, user, system.id):
+    if is_contributor(user) and _is_member_of_system_sql(db, user.id, system.id):
         return True
     return False

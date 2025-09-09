@@ -4,9 +4,13 @@ from __future__ import annotations
 import os
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
+from fastapi.routing import APIRoute
 from fastapi.security import OAuth2PasswordBearer
 
-from app.db.session import engine
+# --- SCHEDULER ---
+from zoneinfo import ZoneInfo
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # ---------------------------
 # MODELS (order matters due to FKs)
@@ -41,6 +45,13 @@ from app.api.v1 import system_assignments
 from app.api.v1 import me
 from app.api.v1 import dashboard
 from app.api.v1 import assessments
+from app.api.v1 import compliance_tasks
+from app.api.v1 import packages as packages_api
+from app.api.v1 import company_packages as company_packages_api
+from app.api.v1 import reports
+from app.api.v1 import audit_logs
+from app.api.v1 import notifications as notifications_api
+from app.api import health as health_api
 
 
 def _try_import_router(module_path: str):

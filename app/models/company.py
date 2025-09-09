@@ -23,6 +23,10 @@ class Company(Base):
     legal_form = Column(String, nullable=True)
     registration_number = Column(String, nullable=True, index=True)
     website = Column(String, nullable=True)
+    
+    # --- ISPRAVLJENO: Dodana kolona 'company_type' ---
+    company_type = Column(String, nullable=True)
+    # ------------------------------------------------
 
     # flag koji već postoji u bazi
     is_authorized_representative = Column(Integer, default=0)

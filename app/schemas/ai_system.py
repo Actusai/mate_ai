@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Dict, List, Optional, Literal
 
-from pydantic import BaseModel, Field, conint, constr, computed_field
+from pydantic import BaseModel, Field, conint, constr
 
 
 # -----------------------------
@@ -12,18 +12,19 @@ class AISystemBase(BaseModel):
     name: constr(strip_whitespace=True, min_length=2, max_length=255)
     purpose: Optional[str] = None
     lifecycle_stage: Optional[constr(strip_whitespace=True, max_length=50)] = None
-    risk_tier: Optional[constr(strip_whitespace=True, max_length=50)] = None  # npr. "high_risk", "minimal_risk", ...
+    risk_tier: Optional[constr(strip_whitespace=True, max_length=50)] = None  # e.g., "high_risk", "minimal_risk"
     status: Optional[constr(strip_whitespace=True, max_length=50)] = None
     owner_user_id: Optional[conint(ge=1)] = None
     notes: Optional[str] = None
 
-    # ✅ Novo: dinamički status sukladnosti
-    # Dozvoljene vrijednosti ostavljamo eksplicitno radi konzistentnosti u klijentu
+    # Legacy/manual field (kept for compatibility). The platform also computes a
+    # compliance status from tasks; that computed value is exposed via
+    # AISystemOutExtended.compliance_status_computed.
     compliance_status: Optional[
         Literal["compliant", "partially_compliant", "non_compliant", "unknown"]
     ] = Field(
         default="unknown",
-        description="Stanje usklađenosti AI sustava s obvezama (AI Act)."
+        description="(Legacy/manual) Compliance status of the AI system."
     )
 
 
@@ -40,7 +41,7 @@ class AISystemUpdate(BaseModel):
     owner_user_id: Optional[conint(ge=1)] = None
     notes: Optional[str] = None
 
-    # ✅ Novo: dopušten i update compliance statusa
+    # Legacy/manual field (kept for compatibility).
     compliance_status: Optional[
         Literal["compliant", "partially_compliant", "non_compliant", "unknown"]
     ] = None
@@ -49,61 +50,38 @@ class AISystemUpdate(BaseModel):
 class AISystemOut(AISystemBase):
     id: int
     company_id: int
+    # 🔹 NEW: expose AR (read-only; set via dedicated endpoints)
+    authorized_representative_user_id: Optional[int] = Field(
+        default=None,
+        description="User ID of the Authorized Representative (read-only; manage via assign/unassign endpoints)."
+    )
     created_at: datetime
     updated_at: datetime
 
-    # ✅ Novo: izvedena metrika – ne sprema se u DB; računa se iz risk_tier + compliance_status
-    @computed_field  # type: ignore[misc]
-    @property
-    def effective_risk_level(self) -> str:
-        """
-        Kombinira inherentni rizik (risk_tier) i stanje usklađenosti (compliance_status)
-        u "operativni" rizik koji prikazujemo na UI-ju.
-        """
-        tier = (self.risk_tier or "").lower().strip()
-        comp = (self.compliance_status or "unknown").lower().strip()
-
-        if tier == "prohibited":
-            return "prohibited_illegal"
-
-        if tier in {"high_risk", "high"}:
-            if comp == "compliant":
-                return "controlled_high_risk"
-            if comp == "partially_compliant":
-                return "elevated_high_risk"
-            if comp == "non_compliant":
-                return "critical_risk"
-            return "high_risk_unknown_compliance"
-
-        if tier in {"limited_risk", "limited"}:
-            if comp == "non_compliant":
-                return "elevated_limited_risk"
-            if comp == "partially_compliant":
-                return "managed_limited_risk"
-            if comp == "compliant":
-                return "limited_risk_compliant"
-            return "limited_risk_unknown_compliance"
-
-        if tier in {"minimal_risk", "minimal", "out_of_scope"}:
-            if comp == "non_compliant":
-                return "formal_breach_low_risk"
-            if comp == "partially_compliant":
-                return "managed_low_risk"
-            if comp == "compliant":
-                return "low_risk_compliant"
-            return "low_risk_unknown_compliance"
-
-        # Fallback ako je tier nepoznat
-        if comp == "non_compliant":
-            return "unknown_tier_non_compliant"
-        if comp == "partially_compliant":
-            return "unknown_tier_partially_compliant"
-        if comp == "compliant":
-            return "unknown_tier_compliant"
-        return "unknown_effective_risk"
-
     class Config:
         from_attributes = True
+
+
+# --------------------------------
+# Extended output with computed badges
+# --------------------------------
+class AISystemOutExtended(AISystemOut):
+    # Computed compliance status from tasks (mandatory coverage + overdue):
+    # values align with the reporting helpers.
+    compliance_status_computed: Optional[
+        Literal["compliant", "at_risk", "non_compliant"]
+    ] = Field(
+        default=None,
+        description="Computed compliance status based on mandatory tasks and overdue items."
+    )
+
+    # Effective risk badge derived from (risk_tier, compliance_status_computed)
+    effective_risk: Optional[
+        Literal["low", "medium", "high", "critical"]
+    ] = Field(
+        default=None,
+        description="Effective risk derived from inherent risk tier and computed compliance status."
+    )
 
 
 # --------------------------------
@@ -111,11 +89,11 @@ class AISystemOut(AISystemBase):
 # --------------------------------
 class RiskAssessmentAnswer(BaseModel):
     """
-    Flat skup boolova koji koristi risk_engine.py.
+    Flat set of booleans consumed by risk_engine.py.
     """
-    # Scope / kontekst
-    is_ai_system: bool = True                 # čl. 3 – ako False -> out_of_scope
-    providers_outside_eu: bool = False        # dodaje situacijske obveze
+    # Scope / context
+    is_ai_system: bool = True                 # Art. 3 – if False -> out_of_scope
+    providers_outside_eu: bool = False        # adds situational obligations
 
     # Prohibited (Art. 5)
     subliminal_techniques: bool = False
@@ -147,16 +125,16 @@ class RiskAssessmentAnswer(BaseModel):
 
 class RiskAssessmentRequest(BaseModel):
     """
-    Tijelo koje POST-aš na /ai-systems/{system_id}/assessment
+    Body to POST to /ai-systems/{system_id}/assessment.
     """
     answers: RiskAssessmentAnswer
 
 
 class RiskAssessmentResult(BaseModel):
     """
-    Odgovor evaluacije.
-    - obligations: map kategorija -> lista obveza
-    - references: kratke pravne reference (npr. 'Art. 9–15', 'Annex III')
+    Assessment response.
+    - obligations: map category -> list of obligations
+    - references: short legal references (e.g., 'Art. 9–15', 'Annex III')
     """
     system_id: int
     risk_tier: constr(strip_whitespace=True, to_lower=True, min_length=3, max_length=20)
