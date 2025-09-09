@@ -1,54 +1,62 @@
 # app/models/document.py
 from __future__ import annotations
-from datetime import datetime, date
-from typing import Optional
-
+from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, Date, DateTime, ForeignKey, Index
+    Column,
+    Integer,
+    String,
+    Text,
+    DateTime,
+    ForeignKey,
+    Index,
+    func,
 )
 from sqlalchemy.orm import relationship
 
-# Reuse the shared Base (same pattern as other models)
-from app.models.user import Base, User
+# Use the same Base as other models so metadata is unified
+from app.models.user import Base
 from app.models.company import Company
+from app.models.user import User
 from app.models.ai_system import AISystem
-from app.models.compliance_task import ComplianceTask
 
 
 class Document(Base):
+    """
+    Technical documentation & evidence for an AI system/company.
+    Also used to store generated packs (ZIP) with type='doc_pack_zip'.
+    """
     __tablename__ = "documents"
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # Scoping – keep explicit company_id for RBAC and fast filtering
+    # Ownership / scoping
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
-
-    # Optional links
-    ai_system_id = Column(Integer, ForeignKey("ai_systems.id", ondelete="SET NULL"), nullable=True, index=True)
-    task_id = Column(Integer, ForeignKey("compliance_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
-
-    # Metadata
-    document_type = Column(String(50), nullable=False, default="evidence")  # e.g. evidence, policy, report, other
-    version = Column(String(50), nullable=True)
-    effective_date = Column(Date, nullable=True)
-
-    # For now we only store an external URL (file uploads can come later)
-    url = Column(Text, nullable=False)
-
-    # Audit
+    ai_system_id = Column(Integer, ForeignKey("ai_systems.id", ondelete="CASCADE"), nullable=True, index=True)
     uploaded_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationships
-    company = relationship(Company)
-    system = relationship(AISystem)
-    task = relationship(ComplianceTask)
-    uploader = relationship(User, foreign_keys=[uploaded_by])
+    # File/meta
+    name = Column(String(255), nullable=False, index=True)          # display name shown in UI
+    storage_url = Column(Text, nullable=True)                       # path/URL to blob/object storage
+    content_type = Column(String(120), nullable=True)               # e.g., application/pdf, application/zip
+    size_bytes = Column(Integer, nullable=True)
 
-    def __repr__(self) -> str:
-        return f"<Document id={self.id} type={self.document_type!r} url={self.url!r} system={self.ai_system_id} task={self.task_id}>"
+    # Annex IV extensions
+    type = Column(String(50), nullable=True, index=True)            # e.g., architecture, datasets, rm_plan, testing, doc_pack_zip
+    metadata_json = Column(Text, nullable=True)                     # arbitrary JSON as text (key/value metadata)
+    status = Column(String(20), nullable=False, default="in_progress", index=True)  # 'complete' | 'in_progress' | 'missing'
+    review_due_at = Column(DateTime, nullable=True, index=True)     # when this doc should be reviewed/refreshed
 
-# Useful composite indexes
-Index("ix_documents_system_task", Document.ai_system_id, Document.task_id)
-Index("ix_documents_company_type", Document.company_id, Document.document_type)
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Relations (lazy joined to avoid N+1 in listings)
+    company = relationship(Company, lazy="joined")
+    system = relationship(AISystem, lazy="joined")
+    uploader = relationship(User, foreign_keys=[uploaded_by], lazy="joined")
+
+
+# Helpful composite indexes for common queries
+Index("ix_documents_company_type", Document.company_id, Document.type)
+Index("ix_documents_system_type", Document.ai_system_id, Document.type)
+Index("ix_documents_status_due", Document.status, Document.review_due_at)

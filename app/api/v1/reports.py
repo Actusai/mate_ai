@@ -1,10 +1,11 @@
 # app/api/v1/reports.py
 from typing import Any, Dict, Optional, List
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 import io, csv, json
-from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.core.auth import get_db, get_current_user
 from app.models.user import User
@@ -20,6 +21,8 @@ from app.services.reporting import (
     # helpers to enrich system_compliance export
     compliance_status_from_pct,
     compute_effective_risk,
+    # NEW combined timeline (regulatory deadlines + company/system compliance_due_date)
+    timeline_for_company,
 )
 from app.services.audit import audit_export, ip_from_request
 from app.services.snapshots import run_snapshots
@@ -27,7 +30,6 @@ from app.core.rbac import (
     ensure_export_access,
     ensure_member_filter_access,
 )
-# AR scenario: staff admin may access assigned companies
 from app.core.scoping import is_assigned_admin, is_super
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -60,6 +62,10 @@ def company_dashboard(
     window_days: int = Query(30, ge=1, le=365),
     due_in_days: int = Query(14, ge=1, le=90),
     alerts_limit: int = Query(10, ge=1, le=100),
+    # NEW timeline params
+    timeline_past_days: int = Query(365, ge=1, le=1825, description="How many past days to include in the timeline"),
+    timeline_future_days: int = Query(365, ge=1, le=1825, description="How many future days to include in the timeline"),
+    timeline_limit: int = Query(100, ge=1, le=500, description="Max items per upcoming/past list"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
@@ -73,6 +79,15 @@ def company_dashboard(
     refs = reference_breakdown(db, company_id)
     alerts = company_alerts(db, company_id, limit=alerts_limit)
 
+    # NEW: combined timeline (regulatory deadlines + company/system compliance_due_date)
+    timeline = timeline_for_company(
+        db,
+        company_id,
+        past_days=timeline_past_days,
+        future_days=timeline_future_days,
+        limit=timeline_limit,
+    )
+
     return {
         "company_id": company_id,
         "kpi": kpis,
@@ -82,6 +97,7 @@ def company_dashboard(
         "team": team,
         "reference_breakdown": refs,
         "alerts": alerts,
+        "timeline": timeline,
     }
 
 
@@ -141,10 +157,9 @@ def export_data(
         "incidents": {"table": "incidents", "restricted": False},
     }
 
-    # PII-safe column allowlist (also used to validate requested columns)
+    # PII-safe allowlist...
     column_allowlist: dict[str, set[str]] = {
         "company_compliance": {"company_id", "systems_cnt", "avg_compliance_pct", "overdue_cnt"},
-        # system_compliance: now exposes risk_tier and derived columns
         "system_compliance": {"ai_system_id", "company_id", "compliance_pct", "overdue_cnt", "risk_tier", "compliance_status", "effective_risk"},
         "task_status": {"company_id", "ai_system_id", "open_cnt", "in_progress_cnt", "blocked_cnt", "postponed_cnt", "done_cnt"},
         "reference_breakdown": {"company_id", "reference", "total", "done_cnt", "overdue_cnt"},
@@ -156,29 +171,21 @@ def export_data(
         "audit_logs": {"id", "company_id", "user_id", "action", "entity_type", "entity_id", "created_at", "ip_address"},
         "users": {"id", "company_id", "email", "role", "invite_status", "is_active", "last_login_at", "created_at"},
         "ai_systems": {"id", "company_id", "name", "risk_tier", "lifecycle_stage", "status", "owner_user_id", "last_activity_at"},
-        # NEW: incidents
         "incidents": {
             "id", "company_id", "ai_system_id", "reported_by",
             "occurred_at", "severity", "type", "summary", "details_json",
             "status", "created_at", "updated_at",
         },
     }
-
-    # ORDER allowlist: mostly mirrors columns; excludes derived fields not in SQL
     order_allowlist: dict[str, set[str]] = {
         "company_compliance": {"company_id", "systems_cnt", "avg_compliance_pct", "overdue_cnt"},
-        "system_compliance": {"ai_system_id", "company_id", "compliance_pct", "overdue_cnt", "risk_tier"},  # no sort by derived fields
+        "system_compliance": {"ai_system_id", "company_id", "compliance_pct", "overdue_cnt", "risk_tier"},
         "task_status": {"company_id", "ai_system_id", "open_cnt", "in_progress_cnt", "blocked_cnt", "postponed_cnt", "done_cnt"},
         "reference_breakdown": {"company_id", "reference", "total", "done_cnt", "overdue_cnt"},
-        "compliance_tasks": {
-            "id", "company_id", "ai_system_id", "title", "status", "severity", "mandatory",
-            "owner_user_id", "due_date", "completed_at", "created_at", "updated_at",
-            "reference", "reminder_days_before"
-        },
+        "compliance_tasks": {"id", "company_id", "ai_system_id", "title", "status", "severity", "mandatory", "owner_user_id", "due_date", "completed_at", "created_at", "updated_at", "reference", "reminder_days_before"},
         "audit_logs": {"id", "company_id", "user_id", "action", "entity_type", "entity_id", "created_at", "ip_address"},
         "users": {"id", "company_id", "email", "role", "invite_status", "is_active", "last_login_at", "created_at"},
         "ai_systems": {"id", "company_id", "name", "risk_tier", "lifecycle_stage", "status", "owner_user_id", "last_activity_at"},
-        # NEW
         "incidents": {"id", "company_id", "ai_system_id", "reported_by", "occurred_at", "severity", "type", "status", "created_at", "updated_at"},
     }
 
@@ -237,18 +244,15 @@ def export_data(
                 "audit_logs",
                 "users",
                 "ai_systems",
-                # NEW
                 "incidents",
             }:
                 filters.append("company_id = :cid")
                 params["cid"] = current_user.company_id
 
-    # SuperAdmin may optionally scope company_compliance by company_id
     if is_super(current_user) and type == "company_compliance" and company_id is not None:
         filters.append("company_id = :cid")
         params["cid"] = company_id
 
-    # ai_system_id filter
     if ai_system_id is not None:
         if table == "ai_systems":
             filters.append("id = :aid")
@@ -257,7 +261,6 @@ def export_data(
             filters.append("ai_system_id = :aid")
             params["aid"] = ai_system_id
 
-    # member_user_id filter
     if member_user_id is not None:
         if table == "ai_systems":
             filters.append("id IN (SELECT ai_system_id FROM ai_system_members WHERE user_id = :muid)")
@@ -269,35 +272,25 @@ def export_data(
     # Incidents-only filters
     if type == "incidents":
         if incident_status:
-            filters.append("status = :istatus")
-            params["istatus"] = incident_status
+            filters.append("status = :istatus"); params["istatus"] = incident_status
         if incident_severity:
-            filters.append("severity = :iseverity")
-            params["iseverity"] = incident_severity
+            filters.append("severity = :iseverity"); params["iseverity"] = incident_severity
         if incident_type:
-            filters.append("type = :itype")
-            params["itype"] = incident_type
-        # Normalize YYYY-MM-DD to full-day bounds
+            filters.append("type = :itype"); params["itype"] = incident_type
         if incident_date_from:
-            params["idfrom"] = incident_date_from + (" 00:00:00" if len(incident_date_from) == 10 else "")
-            filters.append("occurred_at >= :idfrom")
+            filters.append("occurred_at >= :idfrom"); params["idfrom"] = incident_date_from
         if incident_date_to:
-            params["idto"] = incident_date_to + (" 23:59:59" if len(incident_date_to) == 10 else "")
-            filters.append("occurred_at <= :idto")
+            filters.append("occurred_at <= :idto"); params["idto"] = incident_date_to
 
-    # WHERE
+    # WHERE/ORDER/LIMIT
     query = base_query
     if filters:
         query += " WHERE " + " AND ".join(filters)
-
-    # ORDER BY (allowlist)
     if order_by:
         allowed = order_allowlist.get(type, set())
         if order_by not in allowed:
             raise HTTPException(status_code=400, detail=f"Invalid sort column for '{type}'")
         query += f" ORDER BY {order_by} {order_dir.upper()}"
-
-    # LIMIT +1 → truncation signal
     query += " LIMIT :lim_plus_one"
     params["lim_plus_one"] = int(limit) + 1
 
@@ -309,7 +302,7 @@ def export_data(
     if not rows:
         raise HTTPException(status_code=404, detail="No data found for the given parameters")
 
-    # Enrich system_compliance with derived fields (compliance_status, effective_risk)
+    # Enrich system_compliance derived fields
     if type == "system_compliance":
         enriched: List[Dict[str, Any]] = []
         for r in rows:
@@ -346,10 +339,8 @@ def export_data(
     from decimal import Decimal as _Decimal
 
     def _jsonable(v: Any) -> Any:
-        if isinstance(v, (_dt, _date)):
-            return v.isoformat()
-        if isinstance(v, _Decimal):
-            return str(v)
+        if isinstance(v, (_dt, _date)): return v.isoformat()
+        if isinstance(v, _Decimal): return str(v)
         return v
 
     def project_and_redact(r: Dict[str, Any], *, json_safe: bool) -> Dict[str, Any]:
@@ -368,11 +359,7 @@ def export_data(
 
     # JSON
     if fmt == "json":
-        payload = {
-            "items": projected_rows,
-            "truncated": truncated,
-            "count": len(projected_rows),
-        }
+        payload = {"items": projected_rows, "truncated": truncated, "count": len(projected_rows)}
         try:
             audit_export(
                 db,
@@ -382,14 +369,7 @@ def export_data(
                 table_or_view=table,
                 row_count=len(projected_rows),
                 ip=ip_from_request(request),
-                extras={
-                    "ai_system_id": ai_system_id,
-                    "member_user_id": member_user_id,
-                    "truncated": truncated,
-                    "company_id": company_id,
-                    "columns": export_cols,
-                    "redact": list(redact_set),
-                },
+                extras={"ai_system_id": ai_system_id, "member_user_id": member_user_id, "truncated": truncated, "company_id": company_id, "columns": export_cols, "redact": list(redact_set)},
             )
             db.commit()
         except Exception:
@@ -401,22 +381,13 @@ def export_data(
         try:
             from openpyxl import Workbook
         except Exception:
-            raise HTTPException(
-                status_code=400,
-                detail="XLSX export requires 'openpyxl' package. Install it to enable XLSX export."
-            )
-        wb = Workbook()
-        ws = wb.active
-        ws.title = type[:31] or "export"
+            raise HTTPException(status_code=400, detail="XLSX export requires 'openpyxl' package. Install it to enable XLSX export.")
+        wb = Workbook(); ws = wb.active; ws.title = type[:31] or "export"
         ws.append(export_cols)
-        for r in projected_rows:
-            ws.append([r.get(k) for k in export_cols])
+        for r in projected_rows: ws.append([r.get(k) for k in export_cols])
 
-        stream = io.BytesIO()
-        wb.save(stream)
-        stream.seek(0)
+        stream = io.BytesIO(); wb.save(stream); stream.seek(0)
 
-        # audit
         try:
             audit_export(
                 db,
@@ -426,14 +397,7 @@ def export_data(
                 table_or_view=table,
                 row_count=len(projected_rows),
                 ip=ip_from_request(request),
-                extras={
-                    "ai_system_id": ai_system_id,
-                    "member_user_id": member_user_id,
-                    "truncated": truncated,
-                    "company_id": company_id,
-                    "columns": export_cols,
-                    "redact": list(redact_set),
-                },
+                extras={"ai_system_id": ai_system_id, "member_user_id": member_user_id, "truncated": truncated, "company_id": company_id, "columns": export_cols, "redact": list(redact_set)},
             )
             db.commit()
         except Exception:
@@ -443,48 +407,36 @@ def export_data(
         parts = []
         if not is_super(current_user):
             cid_for_name = params.get("cid") or getattr(current_user, "company_id", None)
-            if cid_for_name is not None:
-                parts.append(f"cid{cid_for_name}")
+            if cid_for_name is not None: parts.append(f"cid{cid_for_name}")
         elif company_id is not None:
             parts.append(f"cid{company_id}")
-        if ai_system_id:
-            parts.append(f"aid{ai_system_id}")
-        if member_user_id:
-            parts.append(f"mid{member_user_id}")
+        if ai_system_id: parts.append(f"aid{ai_system_id}")
+        if member_user_id: parts.append(f"mid{member_user_id}")
         suffix = ("_" + "_".join(parts)) if parts else ""
         filename = f"{type}{suffix}_{ts}.xlsx"
-
         headers = {
             "Content-Disposition": f"attachment; filename={filename}",
             "Cache-Control": "no-store",
             "X-Export-Truncated": "1" if truncated else "0",
         }
-        return StreamingResponse(
-            stream,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers=headers,
-        )
+        return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers=headers)
 
     # CSV (default)
     delimiter = {"comma": ",", "semicolon": ";", "tab": "\t"}[sep]
 
     def _sanitize_cell(v: Any) -> Any:
-        if not safe_csv:
-            return v
-        if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@"):
-            return "'" + v
+        if not safe_csv: return v
+        if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@"): return "'" + v
         return v
 
     output = io.StringIO()
-    if bom:
-        output.write("\ufeff")  # UTF-8 BOM for Excel
+    if bom: output.write("\ufeff")
     writer = csv.DictWriter(output, fieldnames=export_cols, delimiter=delimiter)
     writer.writeheader()
     for r in projected_rows:
         writer.writerow({k: _sanitize_cell(r.get(k)) for k in export_cols})
     output.seek(0)
 
-    # audit
     try:
         audit_export(
             db,
@@ -494,14 +446,7 @@ def export_data(
             table_or_view=table,
             row_count=len(projected_rows),
             ip=ip_from_request(request),
-            extras={
-                "ai_system_id": ai_system_id,
-                "member_user_id": member_user_id,
-                "truncated": truncated,
-                "company_id": company_id,
-                "columns": export_cols,
-                "redact": list(redact_set),
-            },
+            extras={"ai_system_id": ai_system_id, "member_user_id": member_user_id, "truncated": truncated, "company_id": company_id, "columns": export_cols, "redact": list(redact_set)},
         )
         db.commit()
     except Exception:
@@ -511,14 +456,11 @@ def export_data(
     parts = []
     if not is_super(current_user):
         cid_for_name = params.get("cid") or getattr(current_user, "company_id", None)
-        if cid_for_name is not None:
-            parts.append(f"cid{cid_for_name}")
+        if cid_for_name is not None: parts.append(f"cid{cid_for_name}")
     elif company_id is not None:
         parts.append(f"cid{company_id}")
-    if ai_system_id:
-        parts.append(f"aid{ai_system_id}")
-    if member_user_id:
-        parts.append(f"mid{member_user_id}")
+    if ai_system_id: parts.append(f"aid{ai_system_id}")
+    if member_user_id: parts.append(f"mid{member_user_id}")
     suffix = ("_" + "_".join(parts)) if parts else ""
     filename = f"{type}{suffix}_{ts}.csv"
 

@@ -1,7 +1,7 @@
 # app/api/v1/companies.py
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Response
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_db, get_current_user
@@ -33,11 +33,11 @@ def _to_out(c: Company) -> CompanyOut:
 
 def _visible_company_ids_for_user(db: Session, current_user: User) -> list[int]:
     """
-    Vidljivi ID-evi za non-super korisnike:
-      - member: vlastita tvrtka
-      - client admin: vlastita tvrtka
-      - staff admin: vlastita + dodijeljene u AdminAssignment
-    Super-admin je zasebno obrađen (bez filtera).
+    Visible IDs for non-super users:
+      - member: own company only
+      - client admin: own company only
+      - staff admin: own + assigned
+    Super admin is handled separately (no filter).
     """
     ids = set()
     if current_user.company_id:
@@ -54,7 +54,11 @@ def _visible_company_ids_for_user(db: Session, current_user: User) -> list[int]:
     return list(ids)
 
 
-@router.get("/companies", response_model=List[CompanyOut])
+@router.get(
+    "/companies",
+    response_model=List[CompanyOut],
+    operation_id="companies_list_v1",
+)
 def list_companies(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -90,7 +94,12 @@ def list_companies(
     return [_to_out(r) for r in rows]
 
 
-@router.post("/companies", response_model=CompanyOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/companies",
+    response_model=CompanyOut,
+    status_code=status.HTTP_201_CREATED,
+    operation_id="companies_create_v1",
+)
 def create_company_endpoint(
     payload: CompanyCreate,
     db: Session = Depends(get_db),
@@ -127,7 +136,11 @@ def create_company_endpoint(
     return _to_out(obj)
 
 
-@router.get("/companies/{company_id}", response_model=CompanyOut)
+@router.get(
+    "/companies/{company_id}",
+    response_model=CompanyOut,
+    operation_id="companies_get_v1",
+)
 def get_company_endpoint(
     company_id: int,
     db: Session = Depends(get_db),
@@ -143,7 +156,11 @@ def get_company_endpoint(
     return _to_out(obj)
 
 
-@router.put("/companies/{company_id}", response_model=CompanyOut)
+@router.put(
+    "/companies/{company_id}",
+    response_model=CompanyOut,
+    operation_id="companies_update_v1",
+)
 def update_company_endpoint(
     company_id: int,
     payload: CompanyUpdate,
@@ -185,7 +202,11 @@ def update_company_endpoint(
     return _to_out(obj)
 
 
-@router.delete("/companies/{company_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/companies/{company_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    operation_id="companies_delete_v1",
+)
 def delete_company_endpoint(
     company_id: int,
     db: Session = Depends(get_db),
@@ -210,66 +231,4 @@ def delete_company_endpoint(
     }
 
     crud_delete_company(db, obj)
-
-    # AUDIT (best-effort)
-    try:
-        audit_log(
-            db,
-            company_id=company_id,
-            user_id=getattr(current_user, "id", None),
-            action="COMPANY_DELETED",
-            entity_type="company",
-            entity_id=company_id,
-            meta=meta_snapshot,
-            ip=ip_from_request(request),
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
-
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.get("/companies/{company_id}/members", response_model=List[UserOut])
-def list_company_members(
-    company_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Vrati sve članove (users) za danu tvrtku.
-    - super_admin: može dohvatiti members bilo koje firme
-    - admin/staff admin (assigned): može dohvatiti members svoje / dodijeljene firme (can_read_company rješava)
-    - običan member: nema pristup tuđim firmama
-    """
-    obj = crud_get_company(db, company_id)
-    if not obj:
-        raise HTTPException(status_code=404, detail="Company not found")
-
-    if not (is_super(current_user) or can_read_company(db, current_user, company_id)):
-        raise HTTPException(status_code=403, detail="Forbidden")
-
-    rows = (
-        db.query(
-            User.id,
-            User.email,
-            User.role,
-            User.company_id,
-            Company.name.label("company_name"),
-        )
-        .join(Company, User.company_id == Company.id, isouter=True)
-        .filter(User.company_id == company_id)
-        .order_by(User.id.asc())
-        .all()
-    )
-
-    return [
-        UserOut(
-            id=r.id,
-            email=r.email,
-            role=r.role,
-            company_id=r.company_id,
-            company_name=r.company_name,
-        )
-        for r in rows
-    ]

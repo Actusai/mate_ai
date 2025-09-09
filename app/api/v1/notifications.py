@@ -1,121 +1,258 @@
 # app/api/v1/notifications.py
-from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from __future__ import annotations
+
+from typing import Optional, Dict, Any, List
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.auth import get_db, get_current_user
 from app.models.user import User
-from app.core.rbac import is_super_admin, ensure_company_access
-from app.services.notifications import run_notifications_cycle
-from app.services.audit import audit_log, ip_from_request
-import json
+from app.core.scoping import is_super
 
-router = APIRouter()
+from app.services.notifications import (
+    # producers
+    generate_due_task_reminders,
+    generate_stale_evidence_reminders,
+    generate_regulatory_deadline_reminders,
+    generate_compliance_due_reminders,
+    generate_assessment_version_notifications,
+    generate_incident_recent_notifications,
+    # cycle + sender
+    run_notifications_cycle,
+    send_pending_notifications,
+)
 
-def _derive_subject(n: Dict[str, Any]) -> Optional[str]:
-    """
-    Lagan subject za prikaz u UI-u, izveden iz type/payload.
-    """
-    t = (n.get("type") or "").lower()
-    payload = n.get("payload") or {}
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {}
+router = APIRouter(prefix="/notifications", tags=["notifications"])
 
-    if t == "task_due_soon":
-        title = payload.get("title") or payload.get("task_title") or "Compliance task"
-        return f"[Reminder] {title}"
-    # fallback
-    return None
 
-@router.get("/notifications")
+def _ensure_superadmin(user: User) -> None:
+    if not is_super(user):
+        raise HTTPException(status_code=403, detail="Super Admin only")
+
+
+# -----------------------------
+# LIST notifications (with filters)
+# -----------------------------
+@router.get("")
 def list_notifications(
-    status: Optional[str] = Query(None, pattern="^(queued|sent|failed)$"),
-    company_id: Optional[int] = Query(None, description="SuperAdmin može zadati; ostali ignorira se"),
-    limit: int = Query(50, ge=1, le=200),
+    type: Optional[List[str]] = Query(None, description="Filter by notification type (repeatable)"),
+    status: Optional[List[str]] = Query(None, description="Filter by status (queued|sent|failed; repeatable)"),
+    ai_system_id: Optional[int] = Query(None, ge=1),
+    company_id: Optional[int] = Query(
+        None,
+        ge=1,
+        description="Super Admin only: view notifications for a specific company",
+    ),
+    mine_only: bool = Query(False, description="If true (non-super), return only notifications addressed to the current user_id"),
+    created_from: Optional[str] = Query(None, description="ISO date/datetime lower bound for created_at"),
+    created_to: Optional[str] = Query(None, description="ISO date/datetime upper bound for created_at"),
+    order_by: str = Query("created_at", pattern="^(id|created_at|sent_at)$"),
+    order_dir: str = Query("desc", pattern="^(?i)(asc|desc)$"),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> List[Dict[str, Any]]:
-    # Odredi company scope
-    if is_super_admin(current_user) and company_id is not None:
-        cid = company_id
-    else:
-        cid = getattr(current_user, "company_id", None)
-    if cid is None:
-        raise HTTPException(status_code=403, detail="Company scope missing")
+) -> Dict[str, Any]:
+    """
+    Returns notifications with flexible filtering. Non–Super Admin users are scoped to their company.
+    """
+    filters: List[str] = []
+    params: Dict[str, Any] = {}
 
-    where = ["company_id = :cid"]
-    params = {"cid": cid}
+    # Scoping
+    if is_super(current_user):
+        if company_id is not None:
+            filters.append("company_id = :cid")
+            params["cid"] = company_id
+    else:
+        if not current_user.company_id:
+            return {"items": [], "count": 0}
+        filters.append("company_id = :cid")
+        params["cid"] = current_user.company_id
+        if mine_only:
+            filters.append("(user_id = :uid OR user_id IS NULL)")
+            params["uid"] = current_user.id
+
+    # Filters
+    if ai_system_id is not None:
+        filters.append("ai_system_id = :aid")
+        params["aid"] = ai_system_id
+
+    if type:
+        type = [t.strip() for t in type if t and t.strip()]
+        if type:
+            placeholders = ", ".join(f":t{i}" for i in range(len(type)))
+            filters.append(f"type IN ({placeholders})")
+            for i, v in enumerate(type):
+                params[f"t{i}"] = v
+
     if status:
-        where.append("LOWER(status) = :st")
-        params["st"] = status.lower()
+        status = [s.strip().lower() for s in status if s and s.strip()]
+        if status:
+            placeholders = ", ".join(f":s{i}" for i in range(len(status)))
+            filters.append(f"LOWER(status) IN ({placeholders})")
+            for i, v in enumerate(status):
+                params[f"s{i}"] = v
+
+    if created_from:
+        filters.append("created_at >= :cfrom")
+        params["cfrom"] = created_from
+    if created_to:
+        filters.append("created_at <= :cto")
+        params["cto"] = created_to
+
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    order = f"{order_by} {order_dir.upper()}"
+    base_select = """
+        SELECT id, company_id, user_id, ai_system_id, task_id,
+               type, channel, status, error, payload, scheduled_at, sent_at, created_at
+        FROM notifications
+    """
+
+    # Count
+    cnt_row = db.execute(text(f"SELECT COUNT(1) AS c FROM notifications {where}"), params).mappings().first()
+    total = int(cnt_row["c"] if cnt_row and "c" in cnt_row else 0)
 
     rows = db.execute(
-        text(f"""
-            SELECT id, company_id, user_id, ai_system_id, task_id,
-                   type, channel, payload, status, error, scheduled_at, sent_at, created_at
-            FROM notifications
-            WHERE {" AND ".join(where)}
-            ORDER BY id DESC
-            LIMIT :lim
-        """),
-        {**params, "lim": limit},
+        text(f"{base_select} {where} ORDER BY {order} LIMIT :lim OFFSET :off"),
+        {**params, "lim": limit, "off": offset},
     ).mappings().all()
 
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        item = dict(r)
-        # pokušaj JSON decode-a payload-a
-        raw_payload = item.get("payload")
-        if isinstance(raw_payload, str):
-            try:
-                item["payload"] = json.loads(raw_payload)
-            except Exception:
-                # ostavi string ako nije JSON
-                pass
-        # praktičan subject
-        item["subject"] = _derive_subject(item)
-        out.append(item)
+    def _coerce_payload(v: Any) -> Any:
+        if v is None:
+            return None
+        try:
+            return json.loads(v)
+        except Exception:
+            return v
 
+    items = []
+    for r in rows:
+        d = dict(r)
+        d["payload"] = _coerce_payload(d.get("payload"))
+        items.append(d)
+
+    return {"items": items, "count": total}
+
+
+# -----------------------------
+# GET single notification
+# -----------------------------
+@router.get("/{notification_id}")
+def get_notification(
+    notification_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Fetch a single notification by ID (scoped to the user's company unless Super Admin).
+    """
+    row = db.execute(
+        text(
+            """
+            SELECT id, company_id, user_id, ai_system_id, task_id,
+                   type, channel, status, error, payload, scheduled_at, sent_at, created_at
+            FROM notifications
+            WHERE id = :nid
+            """
+        ),
+        {"nid": notification_id},
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Notification not found")
+
+    if not is_super(current_user):
+        if int(row["company_id"]) != int(getattr(current_user, "company_id", 0) or 0):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+    out = dict(row)
+    try:
+        out["payload"] = json.loads(out.get("payload") or "{}")
+    except Exception:
+        pass
     return out
 
 
-@router.post("/notifications/run")
-def trigger_notifications_run(
-    request: Request,
-    company_id: Optional[int] = Query(None, description="Ako je zadano i korisnik je SuperAdmin, pokreni za tu firmu"),
+# -----------------------------
+# ADMIN: targeted producers
+# -----------------------------
+@router.post("/admin/run-deadline-reminders")
+def admin_run_deadline_reminders(
+    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-):
-    # RBAC: ako je zadan company_id, superadmin smije sve; non-super mora imati pristup toj firmi
-    if company_id is not None:
-        if not is_super_admin(current_user):
-            ensure_company_access(current_user, company_id)
-        target_cid = company_id
-    else:
-        # default: userova firma (superadmin može None = sve firme)
-        target_cid = None if is_super_admin(current_user) else getattr(current_user, "company_id", None)
-        if target_cid is None and not is_super_admin(current_user):
-            raise HTTPException(status_code=403, detail="Company scope missing")
+) -> Dict[str, Any]:
+    """
+    Generate and send reminders for regulatory deadlines and high-level compliance due dates.
+    Super Admin only.
+    """
+    _ensure_superadmin(current_user)
 
-    res = run_notifications_cycle(db, company_id=target_cid)
-    # poslovna operacija je već commit-ana u servisu; ovdje best-effort audit
-    try:
-        audit_log(
-            db,
-            company_id=(target_cid or getattr(current_user, "company_id", 0) or 0),
-            user_id=getattr(current_user, "id", None),
-            action="NOTIFICATIONS_CYCLE_TRIGGERED",
-            entity_type="notification",
-            entity_id=None,
-            meta={"company_id": target_cid, **res},
-            ip=ip_from_request(request),
-        )
-        db.commit()
-    except Exception:
-        db.rollback()
+    created_reg = generate_regulatory_deadline_reminders(db, for_company_id=company_id)
+    created_comp = generate_compliance_due_reminders(db, for_company_id=company_id)
+    sent = send_pending_notifications(db, for_company_id=company_id)
 
+    return {
+        "ok": True,
+        "created": {
+            "regulatory_deadlines": created_reg,
+            "compliance_due": created_comp,
+        },
+        "sent": sent,
+    }
+
+
+@router.post("/admin/run-task-reminders")
+def admin_run_task_reminders(
+    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Generate and send reminders for compliance tasks (due soon / overdue).
+    Super Admin only.
+    """
+    _ensure_superadmin(current_user)
+
+    created = generate_due_task_reminders(db, for_company_id=company_id)
+    sent = send_pending_notifications(db, for_company_id=company_id)
+    return {"ok": True, "created": {"task_due_soon": created}, "sent": sent}
+
+
+@router.post("/admin/run-stale-evidence-reminders")
+def admin_run_stale_evidence_reminders(
+    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Generate and send reminders for documents with review_due_at in the past.
+    Super Admin only.
+    """
+    _ensure_superadmin(current_user)
+
+    created = generate_stale_evidence_reminders(db, for_company_id=company_id)
+    sent = send_pending_notifications(db, for_company_id=company_id)
+    return {"ok": True, "created": {"stale_evidence": created}, "sent": sent}
+
+
+# -----------------------------
+# ADMIN: unified full-cycle
+# -----------------------------
+@router.post("/admin/run-cycle")
+def admin_run_all_notifications_cycle(
+    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
+    scan_hours: int = Query(24, ge=1, le=168, description="Window for scanning new assessment versions/incidents"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Run all producers (tasks, stale evidence, regulatory deadlines, compliance due, assessment versions, recent incidents)
+    and send queued notifications. Super Admin only.
+    """
+    _ensure_superadmin(current_user)
+    res = run_notifications_cycle(db, company_id=company_id, scan_hours=scan_hours)
     return {"ok": True, **res}

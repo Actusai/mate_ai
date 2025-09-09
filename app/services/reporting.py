@@ -1,508 +1,541 @@
 # app/services/reporting.py
+from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import and_, func, text
+
+# MODELS (best-effort imports; tolerate if some are missing)
+from app.models.company import Company
+from app.models.ai_system import AISystem
+from app.models.user import User
+
+try:
+    from app.models.compliance_task import ComplianceTask  # pragma: no cover
+except Exception:  # pragma: no cover
+    ComplianceTask = None  # type: ignore
+
+try:
+    from app.models.incident import Incident  # pragma: no cover
+except Exception:  # pragma: no cover
+    Incident = None  # type: ignore
+
+try:
+    from app.models.regulatory_deadline import RegulatoryDeadline  # pragma: no cover
+except Exception:  # pragma: no cover
+    RegulatoryDeadline = None  # type: ignore
+
 
 # -----------------------------
-# Time helpers
+# Small risk/compliance helpers
 # -----------------------------
-def _now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
-def _in_days_iso(days: int) -> str:
-    return (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
-
-
-# -----------------------------
-# Compliance helpers
-# -----------------------------
-def compliance_status_from_counts(man_total: int, man_done: int, overdue_cnt: int) -> str:
-    """
-    Derive compliance_status from mandatory-task coverage and overdue count.
-    Rules:
-      - Any overdue mandatory tasks -> 'non_compliant'
-      - 100% mandatory done         -> 'compliant'
-      - >= 80% mandatory done       -> 'at_risk'
-      - otherwise                   -> 'non_compliant'
-    """
-    man_total = int(man_total or 0)
-    man_done = int(man_done or 0)
-    overdue_cnt = int(overdue_cnt or 0)
-
-    if overdue_cnt > 0:
-        return "non_compliant"
-    if man_total == 0:
-        return "compliant"
-    pct = 100.0 * man_done / max(man_total, 1)
-    if pct >= 100.0:
-        return "compliant"
-    if pct >= 80.0:
-        return "at_risk"
-    return "non_compliant"
-
 def compliance_status_from_pct(pct: float, overdue_cnt: int) -> str:
     """
-    Variant when we only have compliance_pct and overdue_cnt.
+    Simple badge:
+      - 'compliant' if pct >= 0.8 and no overdue
+      - 'at_risk'   if pct >= 0.5 and overdue <= 2
+      - 'non_compliant' otherwise
     """
-    overdue_cnt = int(overdue_cnt or 0)
-    pct = float(pct or 0.0)
-    if overdue_cnt > 0:
-        return "non_compliant"
-    if pct >= 100.0:
+    try:
+        p = float(pct or 0.0)
+    except Exception:
+        p = 0.0
+    ov = int(overdue_cnt or 0)
+    if p >= 0.80 and ov == 0:
         return "compliant"
-    if pct >= 80.0:
+    if p >= 0.50 and ov <= 2:
         return "at_risk"
     return "non_compliant"
 
-def compute_effective_risk(risk_tier: Optional[str], compliance_status: str) -> str:
-    """
-    Map (risk_tier, compliance_status) -> effective_risk badge.
-      - High-risk & non_compliant     -> 'critical'
-      - High-risk & at_risk           -> 'high'
-      - Moderate-risk & non_compliant -> 'high'
-      - Moderate-risk & at_risk       -> 'medium'
-      - Minimal/unknown:
-          non_compliant -> 'medium'
-          at_risk       -> 'low'
-          compliant     -> 'low'
-    """
-    rt = (risk_tier or "unknown").lower()
-    cs = (compliance_status or "at_risk").lower()
 
-    if rt == "high_risk":
-        if cs == "non_compliant":
-            return "critical"
-        if cs == "at_risk":
-            return "high"
-        return "medium"  # compliant but still high-risk domain
+def compute_effective_risk(risk_tier: Optional[str], compliance_status: Optional[str]) -> str:
+    """
+    Map inherent risk + compliance badge to a coarse effective level for dashboards.
+    """
+    rt = (risk_tier or "").lower()
+    cs = (compliance_status or "").lower()
 
-    if rt in {"moderate_risk", "limited_risk"}:
-        if cs == "non_compliant":
+    if rt in {"high_risk", "high-risk", "high"}:
+        if cs in {"compliant", "at_risk"}:
             return "high"
+        return "critical"
+
+    if rt in {"limited_risk", "limited-risk", "limited"}:
+        if cs in {"compliant", "at_risk"}:
+            return "medium"
+        return "high"
+
+    if rt in {"minimal_risk", "minimal-risk", "minimal"}:
+        if cs == "compliant":
+            return "low"
         if cs == "at_risk":
             return "medium"
-        return "low"
-
-    # minimal_risk / unknown
-    if cs == "non_compliant":
         return "medium"
-    if cs == "at_risk":
-        return "low"
-    return "low"
+
+    if rt in {"prohibited", "prohibited_risk"}:
+        return "critical"
+
+    return "medium"  # default fallback
 
 
 # -----------------------------
-# Derived compliance for a single system (USED by other routes)
+# Core company dashboard helpers
 # -----------------------------
-def compute_compliance_snapshot(db: Session, ai_system_id: int) -> Dict[str, int]:
+def compute_company_kpis(db: Session, company_id: int, *, window_days: int = 30) -> Dict[str, Any]:
     """
-    Compact snapshot used for status decision and audit meta:
-      - mandatory_total
-      - mandatory_done
-      - overdue_cnt  (not-done & past due)
-      - due_7_cnt    (not-done & due in next 7 days)
+    Very lightweight KPIs: systems count, open tasks, overdue tasks, (optional) open incidents.
     """
-    now = _now_iso()
-    in7 = _in_days_iso(7)
+    now = datetime.utcnow()
+    since = now - timedelta(days=window_days)
 
-    row = db.execute(
-        text("""
-            SELECT
-              SUM(CASE WHEN t.mandatory=1 THEN 1 ELSE 0 END) AS man_total,
-              SUM(CASE WHEN t.mandatory=1 AND t.status='done' THEN 1 ELSE 0 END) AS man_done,
-              SUM(CASE WHEN t.status!='done' AND t.due_date IS NOT NULL AND t.due_date < :now THEN 1 ELSE 0 END) AS overdue_cnt,
-              SUM(CASE WHEN t.status!='done' AND t.due_date IS NOT NULL AND t.due_date >= :now AND t.due_date < :in7 THEN 1 ELSE 0 END) AS due_7_cnt
-            FROM compliance_tasks t
-            WHERE t.ai_system_id = :aid
-        """),
-        {"aid": ai_system_id, "now": now, "in7": in7},
-    ).mappings().first() or {}
+    systems_cnt = db.query(AISystem).filter(AISystem.company_id == company_id).count()
+
+    open_tasks = 0
+    overdue_tasks = 0
+    if ComplianceTask is not None:
+        q = db.query(ComplianceTask).filter(ComplianceTask.company_id == company_id)
+        open_tasks = q.filter(~func.lower(ComplianceTask.status).in_(("done", "cancelled"))).count()
+        overdue_tasks = q.filter(
+            and_(
+                ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+                ComplianceTask.due_date.isnot(None),
+                ComplianceTask.due_date < now,
+            )
+        ).count()
+
+    incidents_open = 0
+    if Incident is not None:
+        incidents_open = (
+            db.query(Incident)
+            .filter(
+                and_(
+                    Incident.company_id == company_id,
+                    ~func.lower(Incident.status).in_(("closed", "resolved")),
+                )
+            )
+            .count()
+        )
 
     return {
-        "mandatory_total": int(row.get("man_total") or 0),
-        "mandatory_done": int(row.get("man_done") or 0),
-        "overdue_cnt": int(row.get("overdue_cnt") or 0),
-        "due_7_cnt": int(row.get("due_7_cnt") or 0),
+        "systems_cnt": systems_cnt,
+        "open_tasks": open_tasks,
+        "overdue_tasks": overdue_tasks,
+        "incidents_open": incidents_open,
+        "window_days": window_days,
+        "since": since.isoformat() + "Z",
+        "now": now.isoformat() + "Z",
     }
-
-def compute_compliance_status_for_system(db: Session, ai_system_id: int) -> str:
-    """
-    Computes 'compliant' | 'at_risk' | 'non_compliant' for a given AI system
-    using the counts of mandatory tasks and overdue count.
-    """
-    snap = compute_compliance_snapshot(db, ai_system_id)
-    return compliance_status_from_counts(
-        snap["mandatory_total"], snap["mandatory_done"], snap["overdue_cnt"]
-    )
-
-
-# -----------------------------
-# COMPANY DASHBOARD METRICS
-# -----------------------------
-def compute_company_kpis(db: Session, company_id: int, window_days: int = 30) -> Dict[str, Any]:
-    now = _now_iso()
-    window_start = (datetime.utcnow() - timedelta(days=window_days)).strftime("%Y-%m-%d %H:%M:%S")
-
-    systems_row = db.execute(text("""
-        SELECT COUNT(*) AS total,
-               SUM(CASE WHEN lifecycle_stage='production' THEN 1 ELSE 0 END) AS production_cnt,
-               SUM(CASE WHEN lifecycle_stage='development' THEN 1 ELSE 0 END) AS development_cnt,
-               SUM(CASE WHEN lifecycle_stage='archived' THEN 1 ELSE 0 END) AS archived_cnt
-        FROM ai_systems WHERE company_id = :cid
-    """), {"cid": company_id}).mappings().first() or {}
-
-    risk_rows = db.execute(text("""
-        SELECT COALESCE(risk_tier, 'unknown') AS risk_tier, COUNT(*) AS cnt
-        FROM ai_systems WHERE company_id = :cid
-        GROUP BY COALESCE(risk_tier, 'unknown')
-    """), {"cid": company_id}).mappings().all()
-    risk_distribution = {r["risk_tier"]: r["cnt"] for r in risk_rows}
-
-    comp_rows = db.execute(text("""
-        SELECT s.id AS system_id,
-               SUM(CASE WHEN t.mandatory=1 THEN 1 ELSE 0 END) AS man_total,
-               SUM(CASE WHEN t.mandatory=1 AND t.status='done' THEN 1 ELSE 0 END) AS man_done
-        FROM ai_systems s
-        LEFT JOIN compliance_tasks t ON t.ai_system_id = s.id
-        WHERE s.company_id = :cid
-        GROUP BY s.id
-    """), {"cid": company_id}).mappings().all()
-    per_system_pct = [100.0 if (r["man_total"] or 0) == 0 else (100.0 * (r["man_done"] or 0) / (r["man_total"] or 1)) for r in comp_rows]
-    avg_compliance_pct = round(sum(per_system_pct) / len(per_system_pct), 2) if per_system_pct else 100.0
-
-    status_row = db.execute(text("""
-        SELECT SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_cnt,
-               SUM(CASE WHEN status='in_progress' THEN 1 ELSE 0 END) AS in_progress_cnt,
-               SUM(CASE WHEN status='blocked' THEN 1 ELSE 0 END) AS blocked_cnt,
-               SUM(CASE WHEN status='postponed' THEN 1 ELSE 0 END) AS postponed_cnt,
-               SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done_cnt
-        FROM compliance_tasks WHERE company_id = :cid
-    """), {"cid": company_id}).mappings().first() or {}
-
-    status_window_row = db.execute(text("""
-        SELECT SUM(CASE WHEN status='open' AND updated_at >= :wstart THEN 1 ELSE 0 END) AS open_w,
-               SUM(CASE WHEN status='in_progress' AND updated_at >= :wstart THEN 1 ELSE 0 END) AS in_progress_w,
-               SUM(CASE WHEN status='blocked' AND updated_at >= :wstart THEN 1 ELSE 0 END) AS blocked_w,
-               SUM(CASE WHEN status='postponed' AND updated_at >= :wstart THEN 1 ELSE 0 END) AS postponed_w,
-               SUM(CASE WHEN status='done' AND updated_at >= :wstart THEN 1 ELSE 0 END) AS done_w
-        FROM compliance_tasks WHERE company_id = :cid
-    """), {"cid": company_id, "wstart": window_start}).mappings().first() or {}
-
-    overdue_cnt = db.execute(text("""
-        SELECT COUNT(*) FROM compliance_tasks
-        WHERE company_id = :cid AND status != 'done'
-              AND due_date IS NOT NULL AND due_date < :now
-    """), {"cid": company_id, "now": now}).scalar() or 0
-
-    due_next_7_cnt = db.execute(text("""
-        SELECT COUNT(*) FROM compliance_tasks
-        WHERE company_id = :cid AND status != 'done'
-              AND due_date IS NOT NULL AND due_date >= :now AND due_date < :in7
-    """), {"cid": company_id, "now": now, "in7": _in_days_iso(7)}).scalar() or 0
-
-    return {
-        "systems": {"total": systems_row.get("total", 0),
-                    "production": systems_row.get("production_cnt", 0),
-                    "development": systems_row.get("development_cnt", 0),
-                    "archived": systems_row.get("archived_cnt", 0),
-                    "risk_distribution": risk_distribution},
-        "compliance": {"avg_compliance_pct": avg_compliance_pct},
-        "tasks": {
-            "status_counts": {
-                "open": status_row.get("open_cnt", 0),
-                "in_progress": status_row.get("in_progress_cnt", 0),
-                "blocked": status_row.get("blocked_cnt", 0),
-                "postponed": status_row.get("postponed_cnt", 0),
-                "done": status_row.get("done_cnt", 0)},
-            "window_counts": {
-                "open": status_window_row.get("open_w", 0),
-                "in_progress": status_window_row.get("in_progress_w", 0),
-                "blocked": status_window_row.get("blocked_w", 0),
-                "postponed": status_window_row.get("postponed_w", 0),
-                "done": status_window_row.get("done_w", 0)},
-            "overdue": overdue_cnt,
-            "due_next_7": due_next_7_cnt}}
 
 
 def systems_table(db: Session, company_id: int) -> List[Dict[str, Any]]:
     """
-    Returns systems summary with compliance_pct / overdue_cnt and computed badges.
+    Small table of systems (id, name, risk_tier, status, owner_user_id).
     """
-    now = _now_iso()
-    in7 = _in_days_iso(7)
-    rows = db.execute(text("""
-        WITH t AS (
-            SELECT s.id AS system_id, s.name AS system_name,
-                   COALESCE(s.risk_tier, 'unknown') AS risk_tier,
-                   SUM(CASE WHEN c.mandatory=1 THEN 1 ELSE 0 END) AS man_total,
-                   SUM(CASE WHEN c.mandatory=1 AND c.status='done' THEN 1 ELSE 0 END) AS man_done,
-                   SUM(CASE WHEN c.status='open' THEN 1 ELSE 0 END) AS open_cnt,
-                   SUM(CASE WHEN c.status!='done' AND c.due_date IS NOT NULL AND c.due_date < :now THEN 1 ELSE 0 END) AS overdue_cnt,
-                   SUM(CASE WHEN c.status!='done' AND c.due_date IS NOT NULL AND c.due_date >= :now AND c.due_date < :in7 THEN 1 ELSE 0 END) AS due_7_cnt
-            FROM ai_systems s
-            LEFT JOIN compliance_tasks c ON c.ai_system_id = s.id
-            WHERE s.company_id = :cid
-            GROUP BY s.id, s.name, s.risk_tier
-        )
-        SELECT system_id, system_name, risk_tier, man_total, man_done, overdue_cnt, due_7_cnt,
-               CASE WHEN man_total=0 THEN 100.0 ELSE ROUND(100.0 * man_done * 1.0 / man_total, 2) END AS compliance_pct,
-               open_cnt
-        FROM t
-        ORDER BY risk_tier DESC, compliance_pct ASC
-    """), {"cid": company_id, "now": now, "in7": in7}).mappings().all()
-
+    rows = (
+        db.query(AISystem)
+        .filter(AISystem.company_id == company_id)
+        .order_by(AISystem.id.desc())
+        .all()
+    )
     out: List[Dict[str, Any]] = []
-    for r in rows:
-        d = dict(r)
-        cs = compliance_status_from_counts(d.get("man_total"), d.get("man_done"), d.get("overdue_cnt"))
-        er = compute_effective_risk(d.get("risk_tier"), cs)
-        d["compliance_status"] = cs
-        d["effective_risk"] = er
-        out.append(d)
+    for s in rows:
+        out.append(
+            {
+                "ai_system_id": s.id,
+                "name": s.name,
+                "risk_tier": s.risk_tier,
+                "status": s.status,
+                "owner_user_id": s.owner_user_id,
+                "created_at": getattr(s, "created_at", None),
+            }
+        )
     return out
 
 
-def overdue_by_owner(db: Session, company_id: int, limit: int = 5) -> List[Dict[str, Any]]:
-    rows = db.execute(text("""
-        SELECT u.id AS user_id, u.full_name AS name, u.email AS email, COUNT(*) AS overdue_cnt
-        FROM compliance_tasks t
-        LEFT JOIN users u ON u.id = t.owner_user_id
-        WHERE t.company_id = :cid AND t.status != 'done'
-              AND t.due_date IS NOT NULL AND t.due_date < datetime('now')
-        GROUP BY u.id, u.full_name, u.email
-        ORDER BY overdue_cnt DESC, name ASC
-        LIMIT :lim
-    """), {"cid": company_id, "lim": limit}).mappings().all()
-    return [dict(r) for r in rows]
+def overdue_by_owner(db: Session, company_id: int, *, limit: int = 5) -> List[Dict[str, Any]]:
+    """
+    Simple aggregation: count overdue tasks per owner.
+    """
+    if ComplianceTask is None:
+        return []
+    now = datetime.utcnow()
+    q = (
+        db.query(
+            ComplianceTask.owner_user_id.label("owner_user_id"),
+            func.count(ComplianceTask.id).label("overdue_cnt"),
+        )
+        .filter(
+            and_(
+                ComplianceTask.company_id == company_id,
+                ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+                ComplianceTask.due_date.isnot(None),
+                ComplianceTask.due_date < now,
+            )
+        )
+        .group_by(ComplianceTask.owner_user_id)
+        .order_by(text("overdue_cnt DESC"))
+        .limit(limit)
+    )
+    return [{"owner_user_id": r.owner_user_id, "overdue_cnt": int(r.overdue_cnt)} for r in q]
 
 
-def upcoming_deadlines(db: Session, company_id: int, in_days: int = 14) -> List[Dict[str, Any]]:
-    rows = db.execute(text("""
-        SELECT t.id, t.title, t.due_date, t.owner_user_id,
-               s.id AS system_id, s.name AS system_name
-        FROM compliance_tasks t
-        JOIN ai_systems s ON s.id = t.ai_system_id
-        WHERE t.company_id = :cid AND t.status != 'done'
-              AND t.due_date IS NOT NULL AND t.due_date >= datetime('now')
-              AND t.due_date < :inN
-        ORDER BY t.due_date ASC
-        LIMIT 200
-    """), {"cid": company_id, "inN": _in_days_iso(in_days)}).mappings().all()
-    return [dict(r) for r in rows]
+def upcoming_deadlines(db: Session, company_id: int, *, in_days: int = 14) -> List[Dict[str, Any]]:
+    """
+    Upcoming task deadlines within N days (not including done/cancelled).
+    """
+    if ComplianceTask is None:
+        return []
+    now = datetime.utcnow()
+    until = now + timedelta(days=in_days)
+    q = (
+        db.query(ComplianceTask)
+        .filter(
+            and_(
+                ComplianceTask.company_id == company_id,
+                ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+                ComplianceTask.due_date.isnot(None),
+                ComplianceTask.due_date <= until,
+                ComplianceTask.due_date >= now,
+            )
+        )
+        .order_by(ComplianceTask.due_date.asc())
+        .limit(100)
+        .all()
+    )
+    return [
+        {
+            "id": t.id,
+            "ai_system_id": t.ai_system_id,
+            "title": t.title,
+            "due_date": t.due_date,
+            "severity": getattr(t, "severity", None),
+            "owner_user_id": t.owner_user_id,
+            "status": t.status,
+        }
+        for t in q
+    ]
 
 
 def team_overview(db: Session, company_id: int) -> List[Dict[str, Any]]:
-    rows = db.execute(text("""
-        WITH task_counts AS (
-            SELECT owner_user_id,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN status!='done' AND due_date IS NOT NULL AND due_date < datetime('now') THEN 1 ELSE 0 END) AS overdue
-            FROM compliance_tasks
-            WHERE company_id = :cid
-            GROUP BY owner_user_id
-        )
-        SELECT u.id AS user_id, u.full_name AS name, u.email AS email,
-               u.role AS role, u.invite_status AS invite_status,
-               COALESCE(tc.total, 0) AS tasks_total,
-               COALESCE(tc.overdue, 0) AS tasks_overdue
-        FROM users u
-        LEFT JOIN task_counts tc ON tc.owner_user_id = u.id
-        WHERE u.company_id = :cid
-        ORDER BY tasks_overdue DESC, name ASC
-    """), {"cid": company_id}).mappings().all()
-    return [dict(r) for r in rows]
+    """
+    Very small team snapshot (id, email, role) for members of the company.
+    """
+    users = db.query(User).filter(User.company_id == company_id).order_by(User.id.asc()).all()
+    return [{"id": u.id, "email": u.email, "role": getattr(u, "role", None)} for u in users]
 
 
 def reference_breakdown(db: Session, company_id: int) -> List[Dict[str, Any]]:
-    rows = db.execute(text("""
-        SELECT t.reference, COUNT(*) AS total,
-               SUM(CASE WHEN t.status='done' THEN 1 ELSE 0 END) AS done_cnt,
-               SUM(CASE WHEN t.status!='done' AND t.due_date IS NOT NULL AND t.due_date < datetime('now') THEN 1 ELSE 0 END) AS overdue_cnt
-        FROM compliance_tasks t
-        JOIN ai_systems s ON s.id = t.ai_system_id
-        WHERE s.company_id = :cid AND t.reference IS NOT NULL AND t.reference <> ''
-        GROUP BY t.reference
-        ORDER BY overdue_cnt DESC, total DESC
-    """), {"cid": company_id}).mappings().all()
-    return [dict(r) for r in rows]
+    """
+    If ComplianceTask has 'reference' (e.g., 'Art. 9'), aggregate by reference.
+    """
+    if ComplianceTask is None:
+        return []
+    q = (
+        db.query(
+            ComplianceTask.reference.label("reference"),
+            func.count(ComplianceTask.id).label("total"),
+            func.sum(func.case((func.lower(ComplianceTask.status) == "done", 1), else_=0)).label("done_cnt"),
+            func.sum(
+                func.case(
+                    (
+                        and_(
+                            ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+                            ComplianceTask.due_date.isnot(None),
+                            ComplianceTask.due_date < datetime.utcnow(),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("overdue_cnt"),
+        )
+        .filter(
+            and_(
+                ComplianceTask.company_id == company_id,
+                ComplianceTask.reference.isnot(None),
+            )
+        )
+        .group_by(ComplianceTask.reference)
+        .order_by(text("total DESC"))
+        .limit(200)
+    )
+    return [
+        {
+            "reference": r.reference,
+            "total": int(r.total or 0),
+            "done_cnt": int(r.done_cnt or 0),
+            "overdue_cnt": int(r.overdue_cnt or 0),
+        }
+        for r in q
+    ]
 
 
-# -----------------------------
-# SUPERADMIN OVERVIEW
-# -----------------------------
+def company_alerts(db: Session, company_id: int, *, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Basic alerts derived from open/overdue tasks and incidents (if model exists).
+    """
+    alerts: List[Dict[str, Any]] = []
+
+    # Overdue tasks alert
+    if ComplianceTask is not None:
+        overdue_cnt = (
+            db.query(ComplianceTask)
+            .filter(
+                and_(
+                    ComplianceTask.company_id == company_id,
+                    ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+                    ComplianceTask.due_date.isnot(None),
+                    ComplianceTask.due_date < datetime.utcnow(),
+                )
+            )
+            .count()
+        )
+        if overdue_cnt > 0:
+            alerts.append(
+                {
+                    "type": "tasks_overdue",
+                    "severity": "high" if overdue_cnt > 5 else "medium",
+                    "message": f"{overdue_cnt} task(s) overdue",
+                }
+            )
+
+    # Open incidents alert
+    if Incident is not None:
+        inc_open = (
+            db.query(Incident)
+            .filter(
+                and_(
+                    Incident.company_id == company_id,
+                    ~func.lower(Incident.status).in_(("closed", "resolved")),
+                )
+            )
+            .count()
+        )
+        if inc_open > 0:
+            alerts.append(
+                {
+                    "type": "incidents_open",
+                    "severity": "medium",
+                    "message": f"{inc_open} incident(s) open",
+                }
+            )
+
+    return alerts[:limit]
+
+
 def compute_superadmin_overview(db: Session) -> Dict[str, Any]:
-    kpi_row = db.execute(text("""
-        WITH sys_cnt AS (
-            SELECT COUNT(*) AS systems_total FROM ai_systems
-        ),
-        comp AS (
-            SELECT c.id AS company_id,
-                   AVG(CASE WHEN z.man_total=0 THEN 100.0 ELSE 100.0 * z.man_done * 1.0 / z.man_total END) AS avg_pct
-            FROM companies c
-            LEFT JOIN (
-                SELECT s.id as system_id, s.company_id,
-                       SUM(CASE WHEN t.mandatory=1 THEN 1 ELSE 0 END) AS man_total,
-                       SUM(CASE WHEN t.mandatory=1 AND t.status='done' THEN 1 ELSE 0 END) AS man_done
-                FROM ai_systems s
-                LEFT JOIN compliance_tasks t ON t.ai_system_id = s.id
-                GROUP BY s.id, s.company_id
-            ) z ON z.company_id = c.id
-            GROUP BY c.id
-        ),
-        overdue AS (
-            SELECT company_id, COUNT(*) AS overdue_cnt
-            FROM compliance_tasks
-            WHERE status != 'done' AND due_date IS NOT NULL AND due_date < datetime('now')
-            GROUP BY company_id
-        )
-        SELECT (SELECT COUNT(*) FROM companies) AS companies_total,
-               (SELECT systems_total FROM sys_cnt) AS systems_total,
-               ROUND(AVG(comp.avg_pct), 2) AS avg_compliance_pct,
-               COALESCE(SUM(overdue.overdue_cnt), 0) AS overdue_total
-        FROM comp
-        LEFT JOIN overdue ON 1=1
-    """)).mappings().first() or {}
+    """
+    Tiny cross-tenant snapshot (counts).
+    """
+    companies = db.query(Company).count()
+    systems = db.query(AISystem).count()
 
-    companies = db.execute(text("""
-        WITH pkg AS (
-            SELECT cp.company_id, p.name AS package_name
-            FROM company_packages cp
-            JOIN packages p ON p.id = cp.package_id
-            GROUP BY cp.company_id
-        ),
-        comp AS (
-            SELECT c.id AS company_id,
-                   AVG(CASE WHEN z.man_total=0 THEN 100.0 ELSE 100.0 * z.man_done * 1.0 / z.man_total END) AS avg_pct,
-                   SUM(z.overdue_cnt) AS overdue_cnt
-            FROM companies c
-            LEFT JOIN (
-                SELECT s.id as system_id, s.company_id,
-                       SUM(CASE WHEN t.mandatory=1 THEN 1 ELSE 0 END) AS man_total,
-                       SUM(CASE WHEN t.mandatory=1 AND t.status='done' THEN 1 ELSE 0 END) AS man_done,
-                       SUM(CASE WHEN t.status!='done' AND t.due_date IS NOT NULL AND t.due_date < datetime('now') THEN 1 ELSE 0 END) AS overdue_cnt
-                FROM ai_systems s
-                LEFT JOIN compliance_tasks t ON t.ai_system_id = s.id
-                GROUP BY s.id, s.company_id
-            ) z ON z.company_id = c.id
-            GROUP BY c.id
-        ),
-        sys AS (
-            SELECT company_id, COUNT(*) AS systems_cnt FROM ai_systems GROUP BY company_id
-        ),
-        usr AS (
-            SELECT company_id, COUNT(*) AS users_cnt FROM users GROUP BY company_id
-        )
-        SELECT c.id AS company_id, c.name AS company_name, c.status, c.last_activity_at,
-               COALESCE(pkg.package_name, '-') AS package_name,
-               COALESCE(sys.systems_cnt, 0) AS systems_cnt,
-               COALESCE(usr.users_cnt, 0) AS users_cnt,
-               ROUND(COALESCE(comp.avg_pct, 100), 2) AS avg_compliance_pct,
-               COALESCE(comp.overdue_cnt, 0) AS overdue_cnt
-        FROM companies c
-        LEFT JOIN pkg ON pkg.company_id = c.id
-        LEFT JOIN comp ON comp.company_id = c.id
-        LEFT JOIN sys ON sys.company_id = c.id
-        LEFT JOIN usr ON usr.company_id = c.id
-        ORDER BY avg_compliance_pct ASC, overdue_cnt DESC, company_name ASC
-    """)).mappings().all()
+    tasks = 0
+    if ComplianceTask is not None:
+        tasks = db.query(ComplianceTask).count()
+
+    incs = 0
+    if Incident is not None:
+        incs = db.query(Incident).count()
 
     return {
-        "kpi": {
-            "companies_total": kpi_row.get("companies_total", 0),
-            "systems_total": kpi_row.get("systems_total", 0),
-            "avg_compliance_pct": kpi_row.get("avg_compliance_pct", 100.0),
-            "overdue_total": kpi_row.get("overdue_total", 0)
-        },
-        "companies": [dict(r) for r in companies]
+        "companies": companies,
+        "ai_systems": systems,
+        "tasks": tasks,
+        "incidents": incs,
     }
 
 
 # -----------------------------
-# EXPORT HELPERS (for /reports/export)
+# Regulatory deadlines timeline (+ Company/System compliance_due_date support)
 # -----------------------------
-def export_ai_systems(db: Session, company_id: int, member_user_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return AI systems for a company; if member_user_id is set, filter by membership."""
-    if member_user_id:
-        query = text("""
-            SELECT s.*
-            FROM ai_systems s
-            JOIN ai_system_members m ON m.ai_system_id = s.id
-            WHERE s.company_id = :cid AND m.user_id = :uid
-        """)
-        params = {"cid": company_id, "uid": member_user_id}
-    else:
-        query = text("SELECT * FROM ai_systems WHERE company_id = :cid")
-        params = {"cid": company_id}
-
-    rows = db.execute(query, params).mappings().all()
-    return [dict(r) for r in rows]
-
-def export_compliance_tasks(db: Session, company_id: int, member_user_id: Optional[int] = None,
-                            ai_system_id: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Return tasks for a company; optionally filter by member and/or specific AI system."""
-    base = ["t.company_id = :cid"]
-    params: Dict[str, Any] = {"cid": company_id}
-    joins = []
-
-    if ai_system_id is not None:
-        base.append("t.ai_system_id = :aid")
-        params["aid"] = ai_system_id
-
-    if member_user_id is not None:
-        joins.append("JOIN ai_system_members m ON m.ai_system_id = t.ai_system_id")
-        base.append("m.user_id = :uid")
-        params["uid"] = member_user_id
-
-    where_clause = " AND ".join(base)
-    join_clause = " ".join(joins)
-
-    query = text(f"""
-        SELECT t.*
-        FROM compliance_tasks t
-        {join_clause}
-        WHERE {where_clause}
-    """)
-
-    rows = db.execute(query, params).mappings().all()
-    return [dict(r) for r in rows]
-
-
-# -----------------------------
-# Alerts
-# -----------------------------
-def company_alerts(db: Session, company_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+def timeline_deadlines(
+    db: Session,
+    company_id: int,
+    *,
+    past_days: int = 365,
+    future_days: int = 365,
+    limit: int = 100,
+) -> dict:
     """
-    Returns list of systems that are high-risk AND non-compliant.
-    (Useful to surface on the company dashboard.)
+    Returns a simple timeline split into 'upcoming' and 'past' regulatory deadlines
+    for the given company. Includes both company- and system-scoped deadlines.
     """
-    now = _now_iso()
-    rows = db.execute(text("""
-        WITH agg AS (
-            SELECT s.id AS system_id, s.name AS system_name,
-                   COALESCE(s.risk_tier, 'unknown') AS risk_tier,
-                   SUM(CASE WHEN t.mandatory=1 THEN 1 ELSE 0 END) AS man_total,
-                   SUM(CASE WHEN t.mandatory=1 AND t.status='done' THEN 1 ELSE 0 END) AS man_done,
-                   SUM(CASE WHEN t.status!='done' AND t.due_date IS NOT NULL AND t.due_date < :now THEN 1 ELSE 0 END) AS overdue_cnt
-            FROM ai_systems s
-            LEFT JOIN compliance_tasks t ON t.ai_system_id = s.id
-            WHERE s.company_id = :cid
-            GROUP BY s.id, s.name, s.risk_tier
+    if RegulatoryDeadline is None:
+        return {"upcoming": [], "past": [], "window": None}
+
+    now = datetime.utcnow()
+    past_after = now - timedelta(days=past_days)
+    future_before = now + timedelta(days=future_days)
+
+    base = db.query(RegulatoryDeadline).filter(RegulatoryDeadline.company_id == company_id)
+
+    # upcoming: [now .. future_before]
+    upcoming_rows = (
+        base.filter(
+            and_(
+                RegulatoryDeadline.due_date >= now,
+                RegulatoryDeadline.due_date <= future_before,
+            )
         )
-        SELECT system_id, system_name, risk_tier, man_total, man_done, overdue_cnt,
-               CASE WHEN man_total=0 THEN 100.0 ELSE ROUND(100.0 * man_done * 1.0 / man_total, 2) END AS compliance_pct
-        FROM agg
-        ORDER BY compliance_pct ASC, overdue_cnt DESC, system_name ASC
-        LIMIT :lim
-    """), {"cid": company_id, "now": now, "lim": limit}).mappings().all()
+        .order_by(RegulatoryDeadline.due_date.asc())
+        .limit(limit)
+        .all()
+    )
 
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        d = dict(r)
-        cs = compliance_status_from_counts(d.get("man_total"), d.get("man_done"), d.get("overdue_cnt"))
-        if (d.get("risk_tier") or "").lower() == "high_risk" and cs == "non_compliant":
-            d["compliance_status"] = cs
-            d["effective_risk"] = compute_effective_risk(d.get("risk_tier"), cs)
-            out.append(d)
-    # Already ordered by lower pct and higher overdue
-    return out
+    # past: [past_after .. now)
+    past_rows = (
+        base.filter(
+            and_(
+                RegulatoryDeadline.due_date < now,
+                RegulatoryDeadline.due_date >= past_after,
+            )
+        )
+        .order_by(RegulatoryDeadline.due_date.desc())
+        .limit(limit)
+        .all()
+    )
+
+    def _row_to_item(r: Any) -> dict:
+        return {
+            "id": r.id,
+            "type": "deadline",
+            "title": getattr(r, "title", None),
+            "description": getattr(r, "description", None),
+            "due_date": r.due_date.isoformat() if getattr(r, "due_date", None) else None,
+            "severity": getattr(r, "severity", None),
+            "status": getattr(r, "status", None),
+            "kind": getattr(r, "kind", None),   # tolerant if model has it
+            "company_id": r.company_id,
+            "ai_system_id": getattr(r, "ai_system_id", None),
+            "created_at": r.created_at.isoformat() if getattr(r, "created_at", None) else None,
+        }
+
+    return {
+        "upcoming": [_row_to_item(r) for r in upcoming_rows],
+        "past": [_row_to_item(r) for r in past_rows],
+        "window": {
+            "from": past_after.date().isoformat(),
+            "to": future_before.date().isoformat(),
+        },
+    }
+
+
+def timeline_for_company(
+    db: Session,
+    company_id: int,
+    *,
+    past_days: int = 365,
+    future_days: int = 365,
+    limit: int = 200,
+) -> dict:
+    """
+    Combined timeline:
+      - RegulatoryDeadline rows (company/system scoped)
+      - Company.compliance_due_date (if present)
+      - Per-system AISystem.compliance_due_date (if present)
+
+    Returns { upcoming: [...], past: [...], window: {from,to} }.
+    """
+    now = datetime.utcnow()
+    base_window = {
+        "from": (now - timedelta(days=past_days)).date().isoformat(),
+        "to": (now + timedelta(days=future_days)).date().isoformat(),
+    }
+
+    # Start with regulatory deadlines (if model exists)
+    reg = timeline_deadlines(db, company_id, past_days=past_days, future_days=future_days, limit=limit)
+
+    items: List[Dict[str, Any]] = []
+    items.extend(reg.get("upcoming", []))
+    items.extend(reg.get("past", []))
+
+    # Company-level compliance due (tolerant if field doesn't exist)
+    company = db.query(Company).filter(Company.id == company_id).first()
+    comp_due = getattr(company, "compliance_due_date", None)
+    if comp_due:
+        items.append(
+            {
+                "id": -1,  # virtual
+                "type": "company_compliance_due",
+                "title": "Company compliance deadline",
+                "description": None,
+                "due_date": comp_due.isoformat(),
+                "severity": "high",
+                "status": "open",
+                "kind": "ai_act_general",
+                "company_id": company_id,
+                "ai_system_id": None,
+                "created_at": None,
+            }
+        )
+
+    # Per-system compliance due (tolerant if field doesn't exist)
+    systems = db.query(AISystem).filter(AISystem.company_id == company_id).all()
+    for s in systems:
+        s_due = getattr(s, "compliance_due_date", None)
+        if s_due:
+            items.append(
+                {
+                    "id": -1000 - int(s.id),  # virtual unique
+                    "type": "system_compliance_due",
+                    "title": f"AI system compliance deadline: {s.name}",
+                    "description": None,
+                    "due_date": s_due.isoformat(),
+                    "severity": "high",
+                    "status": "open",
+                    "kind": "ai_act_system",
+                    "company_id": company_id,
+                    "ai_system_id": s.id,
+                    "created_at": None,
+                }
+            )
+
+    # Partition into upcoming/past
+    upcoming: List[Dict[str, Any]] = []
+    past: List[Dict[str, Any]] = []
+    for it in items:
+        try:
+            d = datetime.fromisoformat(str(it["due_date"]).replace("Z", ""))
+        except Exception:
+            continue
+        if d >= now:
+            upcoming.append(it)
+        else:
+            past.append(it)
+
+    # Sort
+    upcoming.sort(key=lambda x: x.get("due_date") or "")
+    past.sort(key=lambda x: x.get("due_date") or "", reverse=True)
+
+    return {"upcoming": upcoming, "past": past, "window": base_window}
+
+
+# -----------------------------
+# High-level assembler for /reports/company/{id}/dashboard
+# -----------------------------
+def build_company_dashboard(
+    db: Session,
+    company_id: int,
+    *,
+    tasks_window_days: int = 30,
+    upcoming_tasks_in_days: int = 14,
+) -> Dict[str, Any]:
+    """
+    Bundle the dashboard data structure for the API endpoint.
+    """
+    kpis = compute_company_kpis(db, company_id, window_days=tasks_window_days)
+    systems = systems_table(db, company_id)
+    overdue = overdue_by_owner(db, company_id, limit=5)
+    upcoming_tasks = upcoming_deadlines(db, company_id, in_days=upcoming_tasks_in_days)
+    alerts = company_alerts(db, company_id, limit=10)
+    timeline = timeline_for_company(db, company_id, past_days=365, future_days=365)
+
+    return {
+        "kpis": kpis,
+        "systems": systems,
+        "overdue_by_owner": overdue,
+        "upcoming_tasks": upcoming_tasks,
+        "alerts": alerts,
+        "timeline": timeline,
+    }

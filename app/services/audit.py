@@ -1,92 +1,138 @@
 # app/services/audit.py
 from __future__ import annotations
+
+import json
 from typing import Any, Optional, Dict
-from sqlalchemy.orm import Session
+
 from sqlalchemy import text
-import json as _json
+from sqlalchemy.orm import Session
+from fastapi import Request
 
-# -------------------------------------------------------------------
-# Utilities
-# -------------------------------------------------------------------
 
-def ip_from_request(request) -> Optional[str]:
+# -----------------------------
+# Helpers
+# -----------------------------
+def ip_from_request(request: Optional[Request]) -> Optional[str]:
     """
-    Extract client IP:
-      - X-Forwarded-For (prvi IP)
-      - X-Real-IP
-      - request.client.host
+    Best-effort client IP extraction compatible with proxies.
     """
-    try:
-        if not request:
-            return None
-        xf = request.headers.get("x-forwarded-for")
-        if xf:
-            ip = xf.split(",")[0].strip()
-        else:
-            ip = request.headers.get("x-real-ip") or (request.client.host if request.client else None)
-        return ip[:45] if ip else None
-    except Exception:
+    if request is None:
         return None
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # take the first IP in the chain
+        return xff.split(",")[0].strip()
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
+    client = getattr(request, "client", None)
+    return getattr(client, "host", None)
 
 
-def json_dump(obj: Dict[str, Any]) -> str:
-    """Safe JSON dump (compact, UTF-8, no exceptions)."""
-    try:
-        return _json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-    except Exception:
-        return "{}"
+def _ensure_audit_table(db: Session) -> None:
+    """
+    Creates a very simple audit_logs table if it doesn't exist yet.
+    Safe to call repeatedly; keeps you running even without Alembic.
+    """
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id INTEGER NULL,
+                user_id INTEGER NULL,
+                action TEXT NOT NULL,
+                entity_type TEXT NULL,
+                entity_id INTEGER NULL,
+                meta TEXT NULL,
+                ip_address TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+    )
+    db.commit()
 
 
-def _sanitize(action: str, entity_type: Optional[str], ip: Optional[str]) -> tuple[str, Optional[str], Optional[str]]:
-    action_s = (action or "").upper()[:100]
-    entity_type_s = (entity_type[:50] if entity_type else None)
-    ip_s = (ip[:45] if ip else None)
-    return action_s, entity_type_s, ip_s
-
-
-# -------------------------------------------------------------------
-# Core audit API
-# -------------------------------------------------------------------
-
+# -----------------------------
+# Core API
+# -----------------------------
 def audit_log(
     db: Session,
     *,
-    company_id: int,
+    company_id: Optional[int],
     user_id: Optional[int],
     action: str,
-    entity_type: Optional[str] = None,
-    entity_id: Optional[int] = None,
-    meta: Optional[Dict[str, Any]] = None,
-    ip: Optional[str] = None,
+    entity_type: Optional[str],
+    entity_id: Optional[int],
+    meta: Optional[Dict[str, Any]],
+    ip: Optional[str],
 ) -> None:
     """
-    Zapiši događaj u audit_logs. Ne radi commit — call-site odlučuje.
+    Inserts an audit record. Falls back to creating the table if missing.
+    Never raises (swallows failures purposely to not break main flow).
     """
-    action_s, entity_type_s, ip_s = _sanitize(action, entity_type, ip)
-
-    db.execute(
-        text("""
-            INSERT INTO audit_logs (
-                company_id, user_id, action, entity_type, entity_id, meta, ip_address, created_at
+    try:
+        payload = json.dumps(meta or {}, ensure_ascii=False, separators=(",", ":"))
+        db.execute(
+            text(
+                """
+                INSERT INTO audit_logs (
+                    company_id, user_id, action, entity_type, entity_id, meta, ip_address, created_at
+                ) VALUES (
+                    :company_id, :user_id, :action, :entity_type, :entity_id, :meta, :ip, datetime('now')
+                )
+                """
+            ),
+            {
+                "company_id": company_id,
+                "user_id": user_id,
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "meta": payload,
+                "ip": ip,
+            },
+        )
+        db.commit()
+    except Exception:
+        # Try creating the table and retry once
+        try:
+            _ensure_audit_table(db)
+            payload = json.dumps(meta or {}, ensure_ascii=False, separators=(",", ":"))
+            db.execute(
+                text(
+                    """
+                    INSERT INTO audit_logs (
+                        company_id, user_id, action, entity_type, entity_id, meta, ip_address, created_at
+                    ) VALUES (
+                        :company_id, :user_id, :action, :entity_type, :entity_id, :meta, :ip, datetime('now')
+                    )
+                    """
+                ),
+                {
+                    "company_id": company_id,
+                    "user_id": user_id,
+                    "action": action,
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "meta": payload,
+                    "ip": ip,
+                },
             )
-            VALUES (:company_id, :user_id, :action, :entity_type, :entity_id, :meta, :ip, datetime('now'))
-        """),
-        {
-            "company_id": company_id,
-            "user_id": user_id,
-            "action": action_s,
-            "entity_type": entity_type_s,
-            "entity_id": entity_id,
-            "meta": (None if meta is None else json_dump(meta)),
-            "ip": ip_s,
-        },
-    )
+            db.commit()
+        except Exception:
+            # Last resort: swallow
+            try:
+                db.rollback()
+            except Exception:
+                pass
 
 
 def audit_export(
     db: Session,
     *,
-    company_id: int,
+    company_id: Optional[int],
     user_id: Optional[int],
     export_type: str,
     table_or_view: str,
@@ -95,77 +141,24 @@ def audit_export(
     extras: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Prečica za export događaje.
+    Convenience wrapper used by reports/export and similar.
+    Persists an 'EXPORT' action with a structured meta payload.
     """
-    meta = {"table_or_view": table_or_view, "row_count": row_count}
+    meta = {
+        "export_type": export_type,
+        "table_or_view": table_or_view,
+        "row_count": row_count,
+    }
     if extras:
         meta.update(extras)
+
     audit_log(
         db,
         company_id=company_id,
         user_id=user_id,
-        action="EXPORT_PERFORMED",
+        action="EXPORT",
         entity_type="export",
         entity_id=None,
-        meta={"type": export_type, **meta},
+        meta=meta,
         ip=ip,
-    )
-
-
-# -------------------------------------------------------------------
-# Optional convenience helpers (ne mijenjaju postojeće ponašanje)
-# -------------------------------------------------------------------
-
-def audit_login_success(db: Session, *, company_id: int, user_id: int, ip: Optional[str]) -> None:
-    audit_log(
-        db,
-        company_id=company_id,
-        user_id=user_id,
-        action="LOGIN_SUCCESS",
-        entity_type="auth",
-        entity_id=user_id,
-        meta=None,
-        ip=ip,
-    )
-
-def audit_login_failed(db: Session, *, company_id: int, user_email: str, ip: Optional[str]) -> None:
-    audit_log(
-        db,
-        company_id=company_id,
-        user_id=None,
-        action="LOGIN_FAILED",
-        entity_type="auth",
-        entity_id=None,
-        meta={"email": user_email},
-        ip=ip,
-    )
-
-def audit_system_assignment(db: Session, *, company_id: int, actor_user_id: int, ai_system_id: int, target_user_id: int, action: str, ip: Optional[str]) -> None:
-    """
-    action: 'SYSTEM_ASSIGNMENT_CREATED' | 'SYSTEM_ASSIGNMENT_DELETED'
-    """
-    audit_log(
-        db,
-        company_id=company_id,
-        user_id=actor_user_id,
-        action=action,
-        entity_type="system_assignment",
-        entity_id=None,
-        meta={"ai_system_id": ai_system_id, "target_user_id": target_user_id},
-        ip=ip,
-    )
-
-def audit_task_change(db: Session, *, company_id: int, actor_user_id: int, task_id: int, action: str, meta: Optional[Dict[str, Any]], ip: Optional[str]) -> None:
-    """
-    action: 'TASK_CREATED' | 'TASK_UPDATED' | 'TASK_DELETED'
-    """
-    audit_log(
-        db,
-        company_id=company_id,
-        user_id=actor_user_id,
-        action=action,
-        entity_type="compliance_task",
-        entity_id=task_id,
-        meta=meta or {},
-        ip=ip,
-    )
+    ) 

@@ -1,5 +1,8 @@
 # app/main.py
-from fastapi import FastAPI, Depends, Request
+from __future__ import annotations
+
+import os
+from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from fastapi.security import OAuth2PasswordBearer
@@ -9,22 +12,30 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.db.session import SessionLocal, engine
-
-# --- MODELS (order matters due to FKs) ---
-# users -> companies -> packages -> company_package -> invites -> password_reset
-# ai_systems -> admin_assignment -> system_assignment -> ai_assessment
+# ---------------------------
+# MODELS (order matters due to FKs)
+# ---------------------------
 from app.models import user, company, package, company_package, invite
-from app.models import password_reset, ai_system, admin_assignment
-from app.models import system_assignment
+from app.models import password_reset, ai_system, admin_assignment, system_assignment
 from app.models import ai_assessment
-from app.models import task_stats
-from app.models import compliance_task
-from app.models import notification
-from app.models import incident
-from app.models import assessment_approval
 
-# --- ROUTERS ---
+# Optional models (import safely; skip if missing)
+for _mod in (
+    "incident",
+    "notification",
+    "document",
+    "task_stats",
+    "assessment_approval",
+    "regulatory_deadline",
+):
+    try:
+        __import__(f"app.models.{_mod}")  # registers table classes on the shared Base
+    except Exception:
+        pass
+
+# ---------------------------
+# ROUTERS (core)
+# ---------------------------
 from app.api.v1 import auth, invites, catalog, users
 from app.api.v1 import passwords_public, passwords
 from app.api.v1 import companies as companies_api
@@ -42,214 +53,113 @@ from app.api.v1 import audit_logs
 from app.api.v1 import notifications as notifications_api
 from app.api import health as health_api
 
-# --- SERVICES / DEPENDENCIES ---
-from app.services.metering import meter_api
-from app.services.snapshots import run_snapshots
-from app.services.notifications import run_notifications_cycle
 
-# --- ERROR HANDLERS & LOGGING ---
-from app.core.errors import register_exception_handlers
-import logging, time, uuid
-
-#---- Documents ---
-from app.api.v1 import documents
-from app.models import document
-
-#---- Incidents ---
-from app.api.v1 import incidents
-
-# --- CREATE TABLES (idempotent; order matters) ---
-user.Base.metadata.create_all(bind=engine)               # users
-company.Base.metadata.create_all(bind=engine)            # companies
-package.Base.metadata.create_all(bind=engine)            # packages
-company_package.Base.metadata.create_all(bind=engine)    # junction
-invite.Base.metadata.create_all(bind=engine)             # invites
-password_reset.Base.metadata.create_all(bind=engine)     # password_resets
-
-ai_system.Base.metadata.create_all(bind=engine)          # ai_systems
-admin_assignment.Base.metadata.create_all(bind=engine)   # admin_assignments
-system_assignment.Base.metadata.create_all(bind=engine)  # system_assignments
-ai_assessment.Base.metadata.create_all(bind=engine)      # ai_assessments
-
-task_stats.Base.metadata.create_all(bind=engine)         # snapshots (TaskStatsDaily, OwnerTaskStatsDaily)
-compliance_task.Base.metadata.create_all(bind=engine)    # compliance_tasks
-notification.Base.metadata.create_all(bind=engine)       # notifications
-document.Base.metadata.create_all(bind=engine)         # documents
-incident.Base.metadata.create_all(bind=engine)         # incidents
-assessment_approval.Base.metadata.create_all(bind=engine)  # assessment_approvals
-
-# --- APP ---
-def generate_unique_id(route: APIRoute) -> str:
-    """Generate a stable unique operationId from: tag + HTTP method + path."""
-    method = sorted(route.methods)[0].lower() if route.methods else "get"
-    tag = (route.tags[0] if route.tags else "default").lower()
-    path = route.path.replace("/", "_").replace("{", "").replace("}", "")
-    return f"{tag}.{method}{path}".strip("._")
-
-app = FastAPI(
-    title="Mate AI",
-    generate_unique_id_function=generate_unique_id,
-)
-
-# Register global exception handlers
-register_exception_handlers(app)
-
-# Basic logging configuration (adjust externally as needed)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-req_log = logging.getLogger("app.requests")
-
-# Request logging middleware (+ correlation headers and duration)
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    start = time.perf_counter()
-
-    # Prefer inbound correlation headers if present
-    inbound_id = (
-        request.headers.get("X-Request-ID")
-        or request.headers.get("X-Correlation-ID")
-        or request.headers.get("X-Trace-ID")
-    )
-    rid = inbound_id or str(uuid.uuid4())
-    # Store under common names for error handlers and downstream use
-    request.state.request_id = rid
-    request.state.trace_id = rid
-
-    client_ip = request.client.host if request.client else "-"
-    auth_hdr = request.headers.get("authorization")
-    auth = "yes" if auth_hdr else "no"
-    path = request.url.path
-    method = request.method
-
-    # These may be populated by get_current_user during dependency resolution
-    user_id = getattr(request.state, "user_id", None)
-    company_id = getattr(request.state, "company_id", None)
-    is_super = getattr(request.state, "is_super_admin", None)
-
+def _try_import_router(module_path: str):
+    """Import a FastAPI router from module_path if present, else return None."""
     try:
-        response = await call_next(request)
-        status_code = response.status_code
+        mod = __import__(module_path, fromlist=["router"])
+        return getattr(mod, "router", None)
     except Exception:
-        status_code = 500
-        # Re-raise so our global exception handlers craft the JSON error
-        raise
-    finally:
-        dur_ms = (time.perf_counter() - start) * 1000.0
-        # Attach correlation headers if a response object exists
-        if "response" in locals():
-            response.headers["X-Request-ID"] = rid
-            response.headers["X-Correlation-ID"] = rid
-            response.headers["X-Trace-ID"] = rid
-            response.headers["X-Process-Time"] = f"{dur_ms:.2f}ms"
+        return None
 
-        # Refresh user context in case it was set after we read it (common with dependencies)
-        if user_id is None:
-            user_id = getattr(request.state, "user_id", None)
-        if company_id is None:
-            company_id = getattr(request.state, "company_id", None)
-        if is_super is None:
-            is_super = getattr(request.state, "is_super_admin", None)
 
-        req_log.info(
-            "method=%s path=%s status=%s dur_ms=%.2f ip=%s auth=%s rid=%s uid=%s cid=%s super=%s",
-            method, path, status_code, dur_ms, client_ip, auth, rid,
-            str(user_id) if user_id is not None else "-",
-            str(company_id) if company_id is not None else "-",
-            "yes" if is_super else "no",
-        )
-    return response
+# Optional routers (loaded only if modules exist)
+incidents_router = _try_import_router("app.api.v1.incidents")
+notifications_router = _try_import_router("app.api.v1.notifications")
+documents_router = _try_import_router("app.api.v1.documents")  # mounted only once here
+reports_router = _try_import_router("app.api.v1.reports")
+audit_logs_router = _try_import_router("app.api.v1.audit_logs")
+health_router = _try_import_router("app.api.health")
 
-# =============================
-# Background jobs (snapshots & notifications)
-# =============================
-scheduler: BackgroundScheduler | None = None
+# ---------------------------
+# CREATE TABLES (idempotent)
+# ---------------------------
+user.Base.metadata.create_all(bind=engine)
+company.Base.metadata.create_all(bind=engine)
+package.Base.metadata.create_all(bind=engine)
+company_package.Base.metadata.create_all(bind=engine)
+invite.Base.metadata.create_all(bind=engine)
+password_reset.Base.metadata.create_all(bind=engine)
 
-def _snapshot_job():
-    db = SessionLocal()
-    try:
-        # Default: today's snapshot for all companies
-        run_snapshots(db)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+ai_system.Base.metadata.create_all(bind=engine)
+admin_assignment.Base.metadata.create_all(bind=engine)
+system_assignment.Base.metadata.create_all(bind=engine)
 
-def _notifications_job():
-    db = SessionLocal()
-    try:
-        # Run for all companies (None); can iterate per company if needed
-        run_notifications_cycle(db, company_id=None)
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+ai_assessment.Base.metadata.create_all(bind=engine)
+
+# If a unified Base exists (e.g., app.db.base.Base), also create_all on it
+try:
+    from app.db.base import Base as DBBase
+    DBBase.metadata.create_all(bind=engine)
+except Exception:
+    pass
+
+# ---------------------------
+# APP
+# ---------------------------
+app = FastAPI(title="Mate AI")
+
+# ---------------------------
+# ROUTER MOUNT
+# ---------------------------
+app.include_router(auth.router,               prefix="/api/v1", tags=["auth"])
+app.include_router(passwords_public.router,   prefix="/api/v1", tags=["auth"])
+app.include_router(passwords.router,          prefix="/api/v1", tags=["auth"])
+app.include_router(invites.router,            prefix="/api/v1", tags=["invites"])
+app.include_router(catalog.router,            prefix="/api/v1", tags=["catalog"])
+app.include_router(users.router,              prefix="/api/v1", tags=["users"])
+app.include_router(companies_api.router,      prefix="/api/v1", tags=["companies"])
+app.include_router(admin_assignments.router,  prefix="/api/v1", tags=["admin_assignments"])
+app.include_router(systems.router,            prefix="/api/v1", tags=["systems"])
+app.include_router(system_assignments.router, prefix="/api/v1", tags=["system_assignments"])
+app.include_router(me.router,                 prefix="/api/v1", tags=["me"])
+app.include_router(dashboard.router,          prefix="/api/v1", tags=["dashboard"])
+app.include_router(assessments.router,        prefix="/api/v1", tags=["assessments"])
+
+# Optional routers (only if present)
+if documents_router:
+    app.include_router(documents_router,      prefix="/api/v1", tags=["documents"])
+if incidents_router:
+    app.include_router(incidents_router,      prefix="/api/v1", tags=["incidents"])
+if notifications_router:
+    app.include_router(notifications_router,  prefix="/api/v1", tags=["notifications"])
+if reports_router:
+    app.include_router(reports_router,        prefix="/api/v1", tags=["reports"])
+if audit_logs_router:
+    app.include_router(audit_logs_router,     prefix="/api/v1", tags=["audit"])
+if health_router:
+    app.include_router(health_router,         prefix="/api",    tags=["health"])
+
+# ---------------------------
+# Scheduler (daily reminders) – optional & safe
+# ---------------------------
+try:
+    from app.worker.scheduler import make_scheduler  # provided earlier
+except Exception:
+    make_scheduler = None  # type: ignore
 
 @app.on_event("startup")
 def _start_scheduler():
-    global scheduler
-    if scheduler is None:
-        scheduler = BackgroundScheduler(timezone=ZoneInfo("Europe/Zagreb"))
-        # Daily snapshots at 02:15 local time
-        scheduler.add_job(
-            _snapshot_job,
-            CronTrigger(hour=2, minute=15),
-            id="daily_snapshots",
-            replace_existing=True,
-            misfire_grace_time=3600,
-        )
-        # Daily due-task notifications at 08:30 local time
-        scheduler.add_job(
-            _notifications_job,
-            CronTrigger(hour=8, minute=30),
-            id="daily_notifications",
-            replace_existing=True,
-            misfire_grace_time=3600,
-        )
-        scheduler.start()
+    # Enable with ENABLE_SCHEDULER=1 (default 1). Time configured in worker/scheduler.py via env.
+    if make_scheduler and os.getenv("ENABLE_SCHEDULER", "1") == "1":
+        try:
+            app.state.scheduler = make_scheduler()
+            app.state.scheduler.start()
+        except Exception:
+            app.state.scheduler = None  # keep API running if scheduler fails
 
 @app.on_event("shutdown")
 def _stop_scheduler():
-    global scheduler
-    if scheduler:
-        scheduler.shutdown(wait=False)
-        scheduler = None
+    sched = getattr(app.state, "scheduler", None)
+    if sched:
+        try:
+            sched.shutdown(wait=False)
+        except Exception:
+            pass
 
-# --- MOUNT ROUTERS ---
-# Public (no auth / no metering)
-app.include_router(auth.router,             prefix="/api/v1", tags=["auth"])
-app.include_router(passwords_public.router, prefix="/api/v1", tags=["auth"])
-app.include_router(passwords.router,        prefix="/api/v1", tags=["auth"])
-app.include_router(invites.router,          prefix="/api/v1", tags=["invites"])
-app.include_router(catalog.router,          prefix="/api/v1", tags=["catalog"])
-
-# Protected (RBAC) + API metering
-app.include_router(users.router,                prefix="/api/v1", tags=["users"],               dependencies=[Depends(meter_api)])
-app.include_router(companies_api.router,        prefix="/api/v1", tags=["companies"],           dependencies=[Depends(meter_api)])
-app.include_router(admin_assignments.router,    prefix="/api/v1", tags=["admin_assignments"],   dependencies=[Depends(meter_api)])
-app.include_router(systems.router,              prefix="/api/v1", tags=["systems"],             dependencies=[Depends(meter_api)])
-app.include_router(system_assignments.router,   prefix="/api/v1", tags=["system_assignments"],  dependencies=[Depends(meter_api)])
-app.include_router(me.router,                   prefix="/api/v1", tags=["me"],                  dependencies=[Depends(meter_api)])
-app.include_router(dashboard.router,            prefix="/api/v1", tags=["dashboard"],           dependencies=[Depends(meter_api)])
-app.include_router(assessments.router,          prefix="/api/v1", tags=["assessments"],         dependencies=[Depends(meter_api)])
-app.include_router(compliance_tasks.router,     prefix="/api/v1", tags=["compliance_tasks"],    dependencies=[Depends(meter_api)])
-app.include_router(packages_api.router,         prefix="/api/v1", tags=["packages"],            dependencies=[Depends(meter_api)])
-app.include_router(company_packages_api.router, prefix="/api/v1", tags=["company-packages"],    dependencies=[Depends(meter_api)])
-app.include_router(reports.router,              prefix="/api/v1", tags=["reports"],             dependencies=[Depends(meter_api)])
-app.include_router(audit_logs.router,           prefix="/api/v1", tags=["audit"],               dependencies=[Depends(meter_api)])
-app.include_router(notifications_api.router,    prefix="/api/v1", tags=["notifications"],       dependencies=[Depends(meter_api)])
-app.include_router(documents.router,            prefix="/api/v1", tags=["documents"],           dependencies=[Depends(meter_api)])
-app.include_router(incidents.router,            prefix="/api/v1", tags=["incidents"],           dependencies=[Depends(meter_api)])
-
-# Health endpoints (no version prefix)
-app.include_router(health_api.router, prefix="/api")
-
-# --- OpenAPI security scheme (schema only; not enforced globally) ---
+# ---------------------------
+# OpenAPI (dedupe operationId)
+# ---------------------------
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/login")
 
 def custom_openapi():
@@ -269,7 +179,6 @@ def custom_openapi():
         "flows": {"password": {"tokenUrl": "/api/v1/login", "scopes": {}}}
     }
 
-    # Fallback de-dup operationId
     seen = {}
     for path, methods in openapi_schema.get("paths", {}).items():
         for method, operation in methods.items():
@@ -281,14 +190,19 @@ def custom_openapi():
                 continue
             if op_id in seen:
                 tag = (operation.get("tags") or [""])[0]
-                safe_tag = "".join(c for c in tag.lower().replace(" ", "_") if c.isalnum() or c in {"_", "-"})
-                # use 'ch' variable when building suffix (bugfix)
-                path_suffix = "".join(ch for ch in path.replace("/", "_") if ch.isalnum() or ch in {"_", "-"})
+                safe_tag = "".join(
+                    c for c in tag.lower().replace(" ", "_")
+                    if c.isalnum() or c in {"_", "-"}
+                )
+                path_suffix = "".join(
+                    ch for ch in path.replace("/", "_")
+                    if ch.isalnum() or ch in {"_", "-"}
+                )
                 new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}"
-                counter = 2
+                n = 2
                 while new_id in seen:
-                    new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}_{counter}"
-                    counter += 1
+                    new_id = f"{op_id}_{safe_tag}_{m}_{path_suffix}_{n}"
+                    n += 1
                 operation["operationId"] = new_id
                 seen[new_id] = (path, method)
             else:
