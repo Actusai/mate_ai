@@ -29,3 +29,6 @@ htmlcov/
 # Local env files
 .env
 app/.env
+
+# Local DB files
+*.db
