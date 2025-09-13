@@ -1,4 +1,5 @@
 # Mate AI – Backend (FastAPI)
+[![CI](https://github.com/Actusai/mate_ai/actions/workflows/ci.yml/badge.svg)](https://github.com/Actusai/mate_ai/actions/workflows/ci.yml)
 
 FastAPI backend for the Mate AI platform. It provides authentication, company & user management, AI system registry with Authorized Representative (AR) features, calendar (incl. ICS), packages & subscriptions, metrics, and more.
 
