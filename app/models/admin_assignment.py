@@ -13,16 +13,22 @@ class AdminAssignment(Base):
     id = Column(Integer, primary_key=True, index=True)
 
     # User koji je "interni admin" tvoje aplikacije (role='admin')
-    admin_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    admin_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
 
     # Company (klijent) za kojeg je taj admin zadužen
-    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False)
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False
+    )
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
     # Relacije (korisno za dohvat)
     admin = relationship("User", backref="admin_companies", foreign_keys=[admin_id])
-    company = relationship("Company", backref="assigned_admins", foreign_keys=[company_id])
+    company = relationship(
+        "Company", backref="assigned_admins", foreign_keys=[company_id]
+    )
 
     # Sprječava duplikate istog para (admin, company)
     __table_args__ = (

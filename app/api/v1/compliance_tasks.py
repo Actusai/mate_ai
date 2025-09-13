@@ -1,9 +1,14 @@
 # app/api/v1/compliance_tasks.py
+from __future__ import annotations
+
 from typing import List, Optional
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, status, Request, Response
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, func
 
 from app.core.auth import get_db, get_current_user
+
 # RBAC helpers
 from app.core.rbac import (
     ensure_system_access_read,
@@ -13,7 +18,9 @@ from app.core.rbac import (
 
 from app.models.user import User
 from app.schemas.compliance_task import (
-    ComplianceTaskCreate, ComplianceTaskUpdate, ComplianceTaskOut
+    ComplianceTaskCreate,
+    ComplianceTaskUpdate,
+    ComplianceTaskOut,
 )
 from app.crud.compliance_task import (
     get_task as crud_get_task,
@@ -25,8 +32,13 @@ from app.crud.compliance_task import (
 from app.services.audit import audit_log, ip_from_request
 from app.services.reporting import (
     compute_compliance_status_for_system,
-    compute_compliance_snapshot,
 )
+
+# Try to import the richer snapshot helper from services.compliance_tasks, fallback if missing
+try:
+    from app.services.compliance_tasks import compute_compliance_snapshot  # type: ignore
+except Exception:
+    compute_compliance_snapshot = None  # type: ignore
 
 router = APIRouter()
 
@@ -41,8 +53,75 @@ CONTRIBUTOR_ALLOWED = {
     "reminder_days_before",
 }
 
+
 def _to_out(x) -> ComplianceTaskOut:
     return ComplianceTaskOut.model_validate(x)
+
+
+def _fallback_compliance_snapshot(db: Session, system_id: int) -> dict:
+    """
+    Minimal in-module snapshot if services.compliance_tasks.compute_compliance_snapshot
+    is not available. Gives totals/done/open/overdue.
+    """
+    try:
+        from app.models.compliance_task import ComplianceTask
+    except Exception:
+        # If model is unavailable, return a neutral snapshot
+        return {"total": 0, "done": 0, "open": 0, "overdue": 0}
+
+    now = datetime.utcnow()
+    total = (
+        db.query(ComplianceTask)
+        .filter(ComplianceTask.ai_system_id == system_id)
+        .count()
+    )
+    done_cnt = (
+        db.query(ComplianceTask)
+        .filter(
+            and_(
+                ComplianceTask.ai_system_id == system_id,
+                func.lower(ComplianceTask.status) == "done",
+            )
+        )
+        .count()
+    )
+    open_cnt = (
+        db.query(ComplianceTask)
+        .filter(
+            and_(
+                ComplianceTask.ai_system_id == system_id,
+                ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+            )
+        )
+        .count()
+    )
+    overdue_cnt = (
+        db.query(ComplianceTask)
+        .filter(
+            and_(
+                ComplianceTask.ai_system_id == system_id,
+                ~func.lower(ComplianceTask.status).in_(("done", "cancelled")),
+                ComplianceTask.due_date.isnot(None),
+                ComplianceTask.due_date < now,
+            )
+        )
+        .count()
+    )
+    return {
+        "total": total,
+        "done": done_cnt,
+        "open": open_cnt,
+        "overdue": overdue_cnt,
+    }
+
+
+def _snap(db: Session, system_id: int) -> dict:
+    if compute_compliance_snapshot:
+        try:
+            return compute_compliance_snapshot(db, system_id)  # type: ignore
+        except Exception:
+            pass
+    return _fallback_compliance_snapshot(db, system_id)
 
 
 @router.get("/ai-systems/{system_id}/tasks", response_model=List[ComplianceTaskOut])
@@ -50,8 +129,8 @@ def list_tasks(
     system_id: int,
     status_f: Optional[str] = Query(None, alias="status"),
     severity: Optional[str] = Query(None),
-    owner_user_id: Optional[int] = Query(None),         # filter by owner
-    reference: Optional[str] = Query(None),             # partial match
+    owner_user_id: Optional[int] = Query(None),  # filter by owner
+    reference: Optional[str] = Query(None),  # partial match
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     sort_by: str = Query("due_date"),
@@ -80,7 +159,11 @@ def list_tasks(
     return [_to_out(r) for r in rows]
 
 
-@router.post("/ai-systems/{system_id}/tasks", response_model=ComplianceTaskOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/ai-systems/{system_id}/tasks",
+    response_model=ComplianceTaskOut,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_task(
     system_id: int,
     payload: ComplianceTaskCreate,
@@ -99,15 +182,15 @@ def create_task(
     payload.company_id = system.company_id
     payload.ai_system_id = system.id
 
-    # Compute compliance snapshot BEFORE change
+    # Compliance BEFORE change
     old_cs = compute_compliance_status_for_system(db, system.id)
-    old_snap = compute_compliance_snapshot(db, system.id)
+    old_snap = _snap(db, system.id)
 
     obj = crud_create_task(db, payload, user_id=current_user.id)
 
-    # Compute AFTER change
+    # Compliance AFTER change
     new_cs = compute_compliance_status_for_system(db, system.id)
-    new_snap = compute_compliance_snapshot(db, system.id)
+    new_snap = _snap(db, system.id)
 
     # --- AUDIT (best-effort) ---
     try:
@@ -181,7 +264,9 @@ def update_task(
         has_full = False
 
     if not has_full:
-        illegal = set(payload.model_dump(exclude_none=True).keys()) - CONTRIBUTOR_ALLOWED
+        illegal = (
+            set(payload.model_dump(exclude_none=True).keys()) - CONTRIBUTOR_ALLOWED
+        )
         if illegal:
             allowed = ", ".join(sorted(CONTRIBUTOR_ALLOWED))
             raise HTTPException(
@@ -195,14 +280,14 @@ def update_task(
 
     # System compliance BEFORE change
     old_cs = compute_compliance_status_for_system(db, system.id)
-    old_snap = compute_compliance_snapshot(db, system.id)
+    old_snap = _snap(db, system.id)
 
-    # Perform update (commits inside)
+    # Perform update
     obj = crud_update_task(db, obj, payload, user_id=current_user.id)
 
     # System compliance AFTER change
     new_cs = compute_compliance_status_for_system(db, system.id)
-    new_snap = compute_compliance_snapshot(db, system.id)
+    new_snap = _snap(db, system.id)
 
     # --- AUDIT (best-effort) ---
     try:
@@ -277,14 +362,14 @@ def delete_task(
 
     # System compliance BEFORE change
     old_cs = compute_compliance_status_for_system(db, system.id)
-    old_snap = compute_compliance_snapshot(db, system.id)
+    old_snap = _snap(db, system.id)
 
-    # Perform delete (commits inside)
+    # Perform delete
     crud_delete_task(db, obj)
 
     # System compliance AFTER change
     new_cs = compute_compliance_status_for_system(db, system.id)
-    new_snap = compute_compliance_snapshot(db, system.id)
+    new_snap = _snap(db, system.id)
 
     # --- AUDIT (best-effort) ---
     try:

@@ -1,12 +1,19 @@
 # app/models/compliance_task.py
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, Boolean, ForeignKey,
-    CheckConstraint, Index
+    Column,
+    Integer,
+    String,
+    Text,
+    DateTime,
+    Boolean,
+    ForeignKey,
+    CheckConstraint,
+    Index,
 )
 from sqlalchemy.orm import relationship
 
-from app.db.base import Base          # ⬅️ izbjegni kružni import Base-a
+from app.db.base import Base  # ⬅️ izbjegni kružni import Base-a
 from app.models.user import User
 from app.models.company import Company
 from app.models.ai_system import AISystem
@@ -21,8 +28,18 @@ class ComplianceTask(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True)
-    ai_system_id = Column(Integer, ForeignKey("ai_systems.id", ondelete="SET NULL"), nullable=True, index=True)
+    company_id = Column(
+        Integer,
+        ForeignKey("companies.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ai_system_id = Column(
+        Integer,
+        ForeignKey("ai_systems.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     title = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
@@ -57,7 +74,9 @@ class ComplianceTask(Base):
     updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(
+        DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
 
     # Relations
     company = relationship(Company)

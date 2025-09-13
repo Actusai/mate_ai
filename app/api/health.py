@@ -9,6 +9,7 @@ import time
 
 router = APIRouter(tags=["health"])
 
+
 @router.get("/healthz")
 def healthz() -> dict:
     # Jednostavni liveness signal (uvijek 200 ako proces živi)
@@ -16,8 +17,9 @@ def healthz() -> dict:
         "ok": True,
         "service": "mate_ai",
         "status": "healthy",
-        "ts": datetime.now(timezone.utc).isoformat()
+        "ts": datetime.now(timezone.utc).isoformat(),
     }
+
 
 @router.get("/readyz")
 def readyz(db: Session = Depends(get_db)):

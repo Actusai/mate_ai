@@ -14,6 +14,7 @@ class IncidentBase(BaseModel):
     """
     Base schema for incidents.
     """
+
     company_id: conint(ge=1) = Field(..., description="Owner company ID")
     ai_system_id: conint(ge=1) = Field(..., description="AI system ID")
 
@@ -44,6 +45,7 @@ class IncidentCreate(IncidentBase):
     """
     Create payload. 'reported_by' is taken from the authenticated user on the server side.
     """
+
     pass
 
 
@@ -51,10 +53,13 @@ class IncidentUpdate(BaseModel):
     """
     Partial update payload. All fields optional.
     """
+
     occurred_at: Optional[datetime] = None
     severity: Optional[Severity] = None
     type: Optional[constr(strip_whitespace=True, max_length=50)] = None
-    summary: Optional[constr(strip_whitespace=True, min_length=3, max_length=500)] = None
+    summary: Optional[constr(strip_whitespace=True, min_length=3, max_length=500)] = (
+        None
+    )
     details_json: Optional[Dict[str, Any]] = None
     status: Optional[IncidentStatus] = None
 
@@ -63,6 +68,7 @@ class IncidentOut(IncidentBase):
     """
     Read model returned by the API.
     """
+
     id: int
     reported_by: Optional[int] = Field(
         default=None, description="User ID who reported the incident (server-populated)"

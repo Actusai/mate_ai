@@ -1,7 +1,7 @@
 # app/services/notifications.py
 from __future__ import annotations
 
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import Optional, Dict, Any, List
 import json
 
@@ -9,11 +9,16 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.services.audit import audit_log
+from app.services.compliance import (
+    get_fria_status,
+    fria_required_for_system,
+)  # FRIA support
 
 
 # ---------------------------------
 # Helpers
 # ---------------------------------
+
 
 def _recent_notification_exists(
     db: Session,
@@ -114,7 +119,9 @@ def _column_exists(db: Session, table: str, column: str) -> bool:
     return False
 
 
-def _stage_from_days(days_to_due: int, thresholds: tuple[int, int, int]) -> Optional[str]:
+def _stage_from_days(
+    days_to_due: int, thresholds: tuple[int, int, int]
+) -> Optional[str]:
     """
     Return a stage tag ('T-90'/'T-30'/'T-7'/'overdue') or None if not at a checkpoint.
     """
@@ -137,6 +144,7 @@ def render_message(notif_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
     """
     Lightweight templates for transport/audit. Keep EN user-facing text.
     """
+
     def _fmt_dt(v: Any) -> str:
         try:
             return str(v)
@@ -217,8 +225,79 @@ def render_message(notif_type: str, payload: Dict[str, Any]) -> Dict[str, str]:
         )
         return {"subject": subject, "body": body}
 
+    # FRIA nudges
+    if notif_type == "fria_required":
+        sys_name = payload.get("ai_system_name") or ""
+        subject = f"[FRIA] Action required for '{sys_name}'"
+        body = (
+            f"The AI system '{sys_name}' is classified as high-risk and requires a Fundamental Rights Impact Assessment (FRIA).\n"
+            "No completed FRIA was found. Please initiate and upload FRIA documentation."
+        )
+        return {"subject": subject, "body": body}
+
+    if notif_type == "fria_in_progress":
+        sys_name = payload.get("ai_system_name") or ""
+        subject = f"[FRIA] Reminder for '{sys_name}'"
+        body = (
+            f"FRIA for the AI system '{sys_name}' is in progress. "
+            "Please ensure it is completed and the final document is uploaded."
+        )
+        return {"subject": subject, "body": body}
+
+    # AR assignment lifecycle
+    if notif_type == "ar_assigned":
+        sys_name = payload.get("ai_system_name") or ""
+        subject = f"[AR] Authorized Representative assigned to '{sys_name}'"
+        body = (
+            f"An Authorized Representative (user ID: {payload.get('ar_user_id')}) "
+            f"was assigned to AI system '{sys_name}'."
+        )
+        return {"subject": subject, "body": body}
+
+    if notif_type == "ar_unassigned":
+        sys_name = payload.get("ai_system_name") or ""
+        subject = f"[AR] Authorized Representative unassigned from '{sys_name}'"
+        body = (
+            f"The Authorized Representative was unassigned from AI system '{sys_name}'. "
+            f"Change initiated by user ID: {payload.get('unset_by_user_id')}."
+        )
+        return {"subject": subject, "body": body}
+
+    if notif_type == "subscription_expiring":
+        subject = "[Billing] Subscription expiring soon"
+        company = payload.get("company_name") or "Company"
+        pkg = payload.get("package_name") or "subscription"
+        ends = _fmt_dt(payload.get("ends_at"))
+        stage = payload.get("stage") or ""  # npr. T-30 / T-7 / T-1 / overdue
+
+        body = (
+            f"Subscription for '{company}' ({pkg}) is expiring on {ends}"
+            f"{f' ({stage})' if stage else ''}.\n"
+            "Please review the renewal to avoid service interruption."
+        )
+
+        return {"subject": subject, "body": body}
+
+    if notif_type == "subscription_expiring":
+        plan = (
+            payload.get("package_name") or payload.get("package_id") or "Subscription"
+        )
+        company = payload.get("company_name") or ""
+        ends = payload.get("ends_at")
+        stage = payload.get("stage") or ""
+        subject = f"[Billing] Subscription expiring soon ({stage or 'upcoming'})"
+        body = (
+            f"Subscription '{plan}' for company '{company}' is approaching its end date ({ends}).\n"
+            f"Stage: {stage or 'T-?'}.\n"
+            "Please review renewal options to avoid service interruption."
+        )
+        return {"subject": subject, "body": body}
+
     # Fallback
-    return {"subject": f"[{notif_type}] Notification", "body": json.dumps(payload, ensure_ascii=False)}
+    return {
+        "subject": f"[{notif_type}] Notification",
+        "body": json.dumps(payload, ensure_ascii=False),
+    }
 
 
 # ---------------------------------
@@ -247,7 +326,8 @@ def generate_due_task_reminders(
             "(t.status IS NULL OR LOWER(t.status) NOT IN ('done','cancelled'))",
             "t.due_date IS NOT NULL",
             "t.reminder_days_before IS NOT NULL",
-        ] + filters
+        ]
+        + filters
     )
 
     sql = f"""
@@ -321,7 +401,9 @@ def generate_due_task_reminders(
                 "user_id": r["owner_user_id"],
                 "ai_system_id": r["ai_system_id"],
                 "task_id": r["task_id"],
-                "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         )
         created += 1
@@ -331,7 +413,7 @@ def generate_due_task_reminders(
 
 
 # ---------------------------------
-# Event-style producers – incidents (still available)
+# Event-style producers – incidents
 # ---------------------------------
 def produce_incident_created(
     db: Session,
@@ -464,7 +546,7 @@ def produce_incident_status_changed(
 
 
 # ---------------------------------
-# Producer – assessment approved (AR/SuperAdmin)
+# Producers – assessment approved & AR assignment
 # ---------------------------------
 def produce_assessment_approved(
     db: Session,
@@ -515,6 +597,120 @@ def produce_assessment_approved(
         {
             "company_id": company_id,
             "user_id": approver_user_id,
+            "ai_system_id": ai_system_id,
+            "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        },
+    )
+    db.commit()
+    return True
+
+
+def produce_ar_assigned(
+    db: Session,
+    *,
+    company_id: int,
+    ai_system_id: int,
+    ar_user_id: int,
+    set_by_user_id: Optional[int] = None,
+    duplicate_guard_hours: int = 6,
+) -> bool:
+    """
+    Notify that an Authorized Representative was assigned to a system.
+    """
+    marker = f"ar_assign:{ai_system_id}:{ar_user_id}"
+    if _recent_same_payload_exists(
+        db,
+        notif_type="ar_assigned",
+        company_id=company_id,
+        ai_system_id=ai_system_id,
+        payload_key="marker",
+        payload_value=marker,
+        within_hours=duplicate_guard_hours,
+    ):
+        return False
+
+    system_name = _system_name(db, ai_system_id)
+    payload = {
+        "marker": marker,
+        "ai_system_id": ai_system_id,
+        "ai_system_name": system_name,
+        "ar_user_id": ar_user_id,
+        "set_by_user_id": set_by_user_id,
+        "reason": "ar_assigned",
+    }
+
+    db.execute(
+        text(
+            """
+            INSERT INTO notifications(
+                company_id, user_id, ai_system_id, task_id,
+                type, channel, payload,
+                status, error, scheduled_at, sent_at, created_at
+            ) VALUES (
+                :company_id, NULL, :ai_system_id, NULL,
+                'ar_assigned', 'email', :payload,
+                'queued', NULL, NULL, NULL, datetime('now')
+            )
+            """
+        ),
+        {
+            "company_id": company_id,
+            "ai_system_id": ai_system_id,
+            "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        },
+    )
+    db.commit()
+    return True
+
+
+def produce_ar_unassigned(
+    db: Session,
+    *,
+    company_id: int,
+    ai_system_id: int,
+    unset_by_user_id: Optional[int] = None,
+    duplicate_guard_hours: int = 6,
+) -> bool:
+    """
+    Notify that an Authorized Representative was unassigned from a system.
+    """
+    marker = f"ar_unassign:{ai_system_id}"
+    if _recent_same_payload_exists(
+        db,
+        notif_type="ar_unassigned",
+        company_id=company_id,
+        ai_system_id=ai_system_id,
+        payload_key="marker",
+        payload_value=marker,
+        within_hours=duplicate_guard_hours,
+    ):
+        return False
+
+    system_name = _system_name(db, ai_system_id)
+    payload = {
+        "marker": marker,
+        "ai_system_id": ai_system_id,
+        "ai_system_name": system_name,
+        "unset_by_user_id": unset_by_user_id,
+        "reason": "ar_unassigned",
+    }
+
+    db.execute(
+        text(
+            """
+            INSERT INTO notifications(
+                company_id, user_id, ai_system_id, task_id,
+                type, channel, payload,
+                status, error, scheduled_at, sent_at, created_at
+            ) VALUES (
+                :company_id, NULL, :ai_system_id, NULL,
+                'ar_unassigned', 'email', :payload,
+                'queued', NULL, NULL, NULL, datetime('now')
+            )
+            """
+        ),
+        {
+            "company_id": company_id,
             "ai_system_id": ai_system_id,
             "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
         },
@@ -598,7 +794,9 @@ def generate_assessment_version_notifications(
             {
                 "company_id": int(r["company_id"]),
                 "ai_system_id": int(r["ai_system_id"]),
-                "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         )
         created += 1
@@ -656,23 +854,33 @@ def generate_incident_recent_notifications(
             db,
             notif_type="incident_created",
             company_id=int(r["company_id"]),
-            ai_system_id=int(r["ai_system_id"]) if r["ai_system_id"] is not None else None,
+            ai_system_id=(
+                int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+            ),
             payload_key="incident_id",
             payload_value=int(r["incident_id"]),
             within_hours=within_hours_window,
         ):
             continue
 
-        system_name = _system_name(db, int(r["ai_system_id"])) if r["ai_system_id"] is not None else None
+        system_name = (
+            _system_name(db, int(r["ai_system_id"]))
+            if r["ai_system_id"] is not None
+            else None
+        )
         payload = {
             "incident_id": int(r["incident_id"]),
-            "ai_system_id": int(r["ai_system_id"]) if r["ai_system_id"] is not None else None,
+            "ai_system_id": (
+                int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+            ),
             "ai_system_name": system_name,
             "reported_by": r.get("reported_by"),
             "severity": r.get("severity"),
             "type": r.get("type"),
             "summary": r.get("summary"),
-            "occurred_at": (r.get("occurred_at").isoformat() if r.get("occurred_at") else None),
+            "occurred_at": (
+                r.get("occurred_at").isoformat() if r.get("occurred_at") else None
+            ),
             "status": r.get("status"),
             "reason": "incident_created",
         }
@@ -693,8 +901,12 @@ def generate_incident_recent_notifications(
             ),
             {
                 "company_id": int(r["company_id"]),
-                "ai_system_id": (int(r["ai_system_id"]) if r["ai_system_id"] is not None else None),
-                "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "ai_system_id": (
+                    int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+                ),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         )
         created += 1
@@ -704,65 +916,84 @@ def generate_incident_recent_notifications(
 
 
 # ---------------------------------
-# NEW – stale evidence (documents review_due_at < now)
+# FRIA reminders (high-risk systems without completed FRIA)
 # ---------------------------------
-def generate_stale_evidence_reminders(
+def generate_fria_required_reminders(
     db: Session,
     *,
     for_company_id: Optional[int] = None,
-    within_hours_duplicate_guard: int = 24,
+    duplicate_guard_hours: int = 168,  # weekly
 ) -> int:
     """
-    Enqueue reminders for documents where review_due_at < now().
-    Creates 'stale_evidence' notifications (channel=email) with a dupe guard.
+    Scan AI systems and enqueue nudges when FRIA is required but not completed:
+      - 'fria_required' if missing completely
+      - 'fria_in_progress' if a FRIA doc exists but is not complete
     """
-    filters = ["d.review_due_at IS NOT NULL", "d.review_due_at < datetime('now')"]
+    filters = []
     params: Dict[str, Any] = {}
     if for_company_id is not None:
-        filters.append("d.company_id = :cid")
+        filters.append("company_id = :cid")
         params["cid"] = for_company_id
 
-    where = " AND ".join(filters)
-    sql = f"""
-        SELECT
-            d.id            AS document_id,
-            d.company_id    AS company_id,
-            d.ai_system_id  AS ai_system_id,
-            d.name          AS name,
-            d.type          AS type,
-            d.status        AS status,
-            d.review_due_at AS review_due_at
-        FROM documents d
-        WHERE {where}
-        ORDER BY d.review_due_at ASC, d.id ASC
-    """
-    rows = db.execute(text(sql), params).mappings().all()
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    rows = (
+        db.execute(
+            text(
+                f"""
+            SELECT id AS ai_system_id, company_id, name, risk_tier
+            FROM ai_systems
+            {where}
+            ORDER BY id ASC
+            """
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
+
     if not rows:
         return 0
 
     created = 0
     for r in rows:
-        ai_id = int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+        # Decide if FRIA is required (Python-side, tolerant to risk_tier variants)
+        class _Sys:  # lightweight adapter for fria_required_for_system
+            id: int = int(r["ai_system_id"])
+            risk_tier: Optional[str] = r.get("risk_tier")
 
+        sys_like = _Sys()
+
+        if not fria_required_for_system(sys_like):
+            continue
+
+        status = get_fria_status(db, int(r["ai_system_id"])) or {}
+        st = (status.get("status") or "unknown").lower()
+
+        if st == "completed":
+            continue  # nothing to do
+
+        notif_type = (
+            "fria_required" if st in {"missing", "unknown"} else "fria_in_progress"
+        )
+
+        # Duplicate guard keyed by system id
         if _recent_same_payload_exists(
             db,
-            notif_type="stale_evidence",
+            notif_type=notif_type,
             company_id=int(r["company_id"]),
-            ai_system_id=ai_id,
-            payload_key="document_id",
-            payload_value=int(r["document_id"]),
-            within_hours=within_hours_duplicate_guard,
+            ai_system_id=int(r["ai_system_id"]),
+            payload_key="ai_system_id",
+            payload_value=int(r["ai_system_id"]),
+            within_hours=duplicate_guard_hours,
         ):
             continue
 
         payload = {
-            "reason": "stale_evidence",
-            "document_id": int(r["document_id"]),
-            "document_name": r["name"],
-            "document_type": r["type"],
-            "status": r["status"],
-            "review_due_at": str(r["review_due_at"]),
-            "ai_system_id": r["ai_system_id"],
+            "ai_system_id": int(r["ai_system_id"]),
+            "ai_system_name": r["name"],
+            "status": st,
+            "reason": notif_type,
         }
 
         db.execute(
@@ -774,15 +1005,18 @@ def generate_stale_evidence_reminders(
                     status, error, scheduled_at, sent_at, created_at
                 ) VALUES (
                     :company_id, NULL, :ai_system_id, NULL,
-                    'stale_evidence', 'email', :payload,
+                    :type, 'email', :payload,
                     'queued', NULL, NULL, NULL, datetime('now')
                 )
                 """
             ),
             {
                 "company_id": int(r["company_id"]),
-                "ai_system_id": ai_id,
-                "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "ai_system_id": int(r["ai_system_id"]),
+                "type": notif_type,
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         )
         created += 1
@@ -849,7 +1083,9 @@ def generate_regulatory_deadline_reminders(
             db,
             notif_type="regulatory_deadline",
             company_id=int(r["company_id"]),
-            ai_system_id=int(r["ai_system_id"]) if r["ai_system_id"] is not None else None,
+            ai_system_id=(
+                int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+            ),
             payload_key="deadline_marker",
             payload_value=marker,
             within_hours=duplicate_guard_hours,
@@ -885,8 +1121,12 @@ def generate_regulatory_deadline_reminders(
             ),
             {
                 "company_id": int(r["company_id"]),
-                "ai_system_id": int(r["ai_system_id"]) if r["ai_system_id"] is not None else None,
-                "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "ai_system_id": (
+                    int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+                ),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         )
         created += 1
@@ -895,15 +1135,114 @@ def generate_regulatory_deadline_reminders(
     return created
 
 
-def generate_compliance_due_reminders(
+def _generate_compliance_due_from_table(
     db: Session,
     *,
-    for_company_id: Optional[int] = None,
-    thresholds: tuple[int, int, int] = (90, 30, 7),
-    duplicate_guard_hours: int = 24,
+    for_company_id: Optional[int],
+    thresholds: tuple[int, int, int],
+    duplicate_guard_hours: int,
 ) -> int:
     """
-    Enqueue reminders for company.compliance_due_date and/or ai_systems.compliance_due_date (if columns exist).
+    New path: compliance_due_dates table (if present).
+    """
+    try:
+        db.execute(text("SELECT 1 FROM compliance_due_dates LIMIT 1"))
+    except Exception:
+        return 0
+
+    filters = ["due_date IS NOT NULL"]
+    params: Dict[str, Any] = {}
+    if for_company_id is not None:
+        filters.append("company_id = :cid")
+        params["cid"] = for_company_id
+
+    sql = f"""
+        SELECT id, company_id, ai_system_id, title, scope, due_date, status
+        FROM compliance_due_dates
+        WHERE {" AND ".join(filters)} AND (status IS NULL OR LOWER(status) NOT IN ('done','waived','archived'))
+        ORDER BY due_date ASC, id ASC
+    """
+    rows = db.execute(text(sql), params).mappings().all()
+
+    if not rows:
+        return 0
+
+    created = 0
+    today = date.today()
+    for r in rows:
+        due_raw = r["due_date"]
+        if not due_raw:
+            continue
+        due = date.fromisoformat(str(due_raw)[:10])
+        stage = _stage_from_days((due - today).days, thresholds)
+        if stage is None:
+            continue
+
+        marker = f"comp_due:table:{int(r['id'])}:{stage}:{due.isoformat()}"
+        if _recent_same_payload_exists(
+            db,
+            notif_type="compliance_due",
+            company_id=int(r["company_id"]),
+            ai_system_id=(
+                int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+            ),
+            payload_key="deadline_marker",
+            payload_value=marker,
+            within_hours=duplicate_guard_hours,
+        ):
+            continue
+
+        payload = {
+            "reason": "compliance_due",
+            "scope": r["scope"] or ("ai_system" if r["ai_system_id"] else "company"),
+            "company_id": int(r["company_id"]),
+            "ai_system_id": (
+                int(r["ai_system_id"]) if r["ai_system_id"] is not None else None
+            ),
+            "title": r["title"],
+            "due_date": due.isoformat(),
+            "stage": stage,
+            "status": r["status"],
+            "deadline_marker": marker,
+        }
+
+        db.execute(
+            text(
+                """
+                INSERT INTO notifications(
+                    company_id, user_id, ai_system_id, task_id,
+                    type, channel, payload,
+                    status, error, scheduled_at, sent_at, created_at
+                ) VALUES (
+                    :company_id, NULL, :ai_system_id, NULL,
+                    'compliance_due', 'email', :payload,
+                    'queued', NULL, NULL, NULL, datetime('now')
+                )
+                """
+            ),
+            {
+                "company_id": payload["company_id"],
+                "ai_system_id": payload["ai_system_id"],
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
+            },
+        )
+        created += 1
+
+    db.commit()
+    return created
+
+
+def _generate_compliance_due_from_legacy_columns(
+    db: Session,
+    *,
+    for_company_id: Optional[int],
+    thresholds: tuple[int, int, int],
+    duplicate_guard_hours: int,
+) -> int:
+    """
+    Legacy path: companies.compliance_due_date and ai_systems.compliance_due_date (if columns exist).
     """
     created = 0
     today = date.today()
@@ -930,7 +1269,9 @@ def generate_compliance_due_reminders(
             if stage is None:
                 continue
 
-            marker = f"comp_due:company:{int(r['company_id'])}:{stage}:{due.isoformat()}"
+            marker = (
+                f"comp_due:company:{int(r['company_id'])}:{stage}:{due.isoformat()}"
+            )
             if _recent_same_payload_exists(
                 db,
                 notif_type="compliance_due",
@@ -966,7 +1307,9 @@ def generate_compliance_due_reminders(
                 ),
                 {
                     "company_id": int(r["company_id"]),
-                    "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    "payload": json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    ),
                 },
             )
             created += 1
@@ -993,7 +1336,9 @@ def generate_compliance_due_reminders(
             if stage is None:
                 continue
 
-            marker = f"comp_due:system:{int(r['ai_system_id'])}:{stage}:{due.isoformat()}"
+            marker = (
+                f"comp_due:system:{int(r['ai_system_id'])}:{stage}:{due.isoformat()}"
+            )
             if _recent_same_payload_exists(
                 db,
                 notif_type="compliance_due",
@@ -1032,10 +1377,282 @@ def generate_compliance_due_reminders(
                 {
                     "company_id": int(r["company_id"]),
                     "ai_system_id": int(r["ai_system_id"]),
-                    "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    "payload": json.dumps(
+                        payload, ensure_ascii=False, separators=(",", ":")
+                    ),
                 },
             )
             created += 1
+
+    db.commit()
+    return created
+
+
+def generate_compliance_due_reminders(
+    db: Session,
+    *,
+    for_company_id: Optional[int] = None,
+    thresholds: tuple[int, int, int] = (90, 30, 7),
+    duplicate_guard_hours: int = 24,
+) -> int:
+    """
+    Enqueue reminders for compliance due dates using either:
+      - compliance_due_dates table (if present), and/or
+      - legacy columns companies.compliance_due_date / ai_systems.compliance_due_date
+    """
+    created = 0
+    created += _generate_compliance_due_from_table(
+        db,
+        for_company_id=for_company_id,
+        thresholds=thresholds,
+        duplicate_guard_hours=duplicate_guard_hours,
+    )
+    created += _generate_compliance_due_from_legacy_columns(
+        db,
+        for_company_id=for_company_id,
+        thresholds=thresholds,
+        duplicate_guard_hours=duplicate_guard_hours,
+    )
+    return created
+
+
+# ---------------------------------
+# Subscription expiring reminders
+# ---------------------------------
+def generate_subscription_expiring_reminders(
+    db: Session,
+    *,
+    for_company_id: Optional[int] = None,
+    thresholds: tuple[int, int, int] = (30, 7, 1),
+    duplicate_guard_hours: int = 24,
+) -> int:
+    """
+    Enqueue 'subscription_expiring' notifications for company_packages nearing expiry.
+    Stages: T-30, T-7, T-1 and 'overdue' (after ends_at).
+    Tolerant to schema differences (optional status column).
+    Dedupe by (company_package_id, stage, ends_at) within duplicate_guard_hours.
+    """
+    # If the base table doesn't exist, no-op safely
+    try:
+        db.execute(text("SELECT 1 FROM company_packages LIMIT 1"))
+    except Exception:
+        return 0
+
+    filters = ["cp.ends_at IS NOT NULL"]
+    params: Dict[str, Any] = {}
+    if for_company_id is not None:
+        filters.append("cp.company_id = :cid")
+        params["cid"] = for_company_id
+
+    # Optional: filter out cancelled/archived/expired if 'status' column exists
+    def _column_exists_local(table: str, col: str) -> bool:
+        try:
+            cols = db.execute(text(f"PRAGMA table_info({table})")).mappings().all()
+            return any((str(c.get("name")) == col) for c in cols)
+        except Exception:
+            return False
+
+    has_status = _column_exists_local("company_packages", "status")
+    if has_status:
+        filters.append("LOWER(cp.status) NOT IN ('cancelled','archived','expired')")
+
+    sql = f"""
+        SELECT
+            cp.id           AS company_package_id,
+            cp.company_id   AS company_id,
+            cp.package_id   AS package_id,
+            cp.starts_at    AS starts_at,
+            cp.ends_at      AS ends_at,
+            {"cp.status       AS status," if has_status else "NULL AS status,"}
+            c.name          AS company_name,
+            COALESCE(p.name, p.code) AS package_name
+        FROM company_packages cp
+        LEFT JOIN companies c ON c.id = cp.company_id
+        LEFT JOIN packages  p ON p.id = cp.package_id
+        WHERE {" AND ".join(filters)}
+        ORDER BY cp.ends_at ASC, cp.id ASC
+    """
+    rows = db.execute(text(sql), params).mappings().all()
+    if not rows:
+        return 0
+
+    created = 0
+    today = date.today()
+
+    for r in rows:
+        ends_raw = r["ends_at"]
+        if not ends_raw:
+            continue
+
+        # Normalize to date (support datetime/str)
+        try:
+            ends_dt = date.fromisoformat(str(ends_raw)[:10])
+        except Exception:
+            continue
+
+        days_to_end = (ends_dt - today).days
+        stage = _stage_from_days(days_to_end, thresholds)
+        if stage is None:
+            continue  # not at a checkpoint
+
+        # Dedupe marker: package + stage + exact end date
+        marker = f"sub:{int(r['company_package_id'])}:{stage}:{ends_dt.isoformat()}"
+
+        if _recent_same_payload_exists(
+            db,
+            notif_type="subscription_expiring",
+            company_id=int(r["company_id"]),
+            ai_system_id=None,
+            payload_key="subscription_marker",
+            payload_value=marker,
+            within_hours=duplicate_guard_hours,
+        ):
+            continue
+
+        payload = {
+            "reason": "subscription_expiring",
+            "subscription_marker": marker,
+            "company_id": int(r["company_id"]),
+            "company_package_id": int(r["company_package_id"]),
+            "package_id": r.get("package_id"),
+            "package_name": r.get("package_name"),
+            "company_name": r.get("company_name"),
+            "ends_at": ends_dt.isoformat(),
+            "stage": stage,  # 'T-30' | 'T-7' | 'T-1' | 'overdue'
+            "status": r.get("status"),
+        }
+
+        db.execute(
+            text(
+                """
+                INSERT INTO notifications(
+                    company_id, user_id, ai_system_id, task_id,
+                    type, channel, payload,
+                    status, error, scheduled_at, sent_at, created_at
+                ) VALUES (
+                    :company_id, NULL, NULL, NULL,
+                    'subscription_expiring', 'email', :payload,
+                    'queued', NULL, NULL, NULL, datetime('now')
+                )
+                """
+            ),
+            {
+                "company_id": int(r["company_id"]),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
+            },
+        )
+        created += 1
+
+    db.commit()
+    return created
+
+
+# --------------------------------
+# Subscription reminders
+# --------------------------------
+def generate_subscription_expiry_reminders(
+    db: Session,
+    *,
+    for_company_id: Optional[int] = None,
+    thresholds: tuple[int, int, int] = (30, 7, 1),
+    duplicate_guard_hours: int = 24,
+) -> int:
+    """
+    Enqueue 'subscription_expiring' for active company_packages whose ends_at is near.
+    Dedupe per (company_package_id, stage) within duplicate_guard_hours.
+    """
+    # Tolerant: ako tablice ne postoje, tiho izađi
+    try:
+        db.execute(text("SELECT 1 FROM company_packages LIMIT 1"))
+        db.execute(text("SELECT 1 FROM packages LIMIT 1"))
+        db.execute(text("SELECT 1 FROM companies LIMIT 1"))
+    except Exception:
+        return 0
+
+    filters = ["cp.status = 'active'", "cp.ends_at IS NOT NULL"]
+    params: Dict[str, Any] = {}
+    if for_company_id is not None:
+        filters.append("cp.company_id = :cid")
+        params["cid"] = for_company_id
+
+    sql = f"""
+        SELECT
+            cp.id           AS cp_id,
+            cp.company_id   AS company_id,
+            cp.ends_at      AS ends_at,
+            p.id            AS package_id,
+            p.name          AS package_name,
+            c.name          AS company_name
+        FROM company_packages cp
+        JOIN packages p ON p.id = cp.package_id
+        JOIN companies c ON c.id = cp.company_id
+        WHERE {' AND '.join(filters)}
+        ORDER BY cp.ends_at ASC, cp.id ASC
+    """
+    rows = db.execute(text(sql), params).mappings().all()
+    if not rows:
+        return 0
+
+    today = date.today()
+    created = 0
+    for r in rows:
+        ends_raw = r["ends_at"]
+        if not ends_raw:
+            continue
+        ends = date.fromisoformat(str(ends_raw)[:10])
+        days_to_end = (ends - today).days
+        stage = _stage_from_days(days_to_end, thresholds)
+        if stage is None:
+            continue  # nismo na kontrolnoj točki
+
+        marker = f"subexp:{int(r['cp_id'])}:{stage}"  # npr. subexp:42:T-7
+
+        if _recent_same_payload_exists(
+            db,
+            notif_type="subscription_expiring",
+            company_id=int(r["company_id"]),
+            ai_system_id=None,
+            payload_key="expiry_marker",
+            payload_value=marker,
+            within_hours=duplicate_guard_hours,
+        ):
+            continue
+
+        payload = {
+            "expiry_marker": marker,
+            "company_package_id": int(r["cp_id"]),
+            "company_id": int(r["company_id"]),
+            "company_name": r["company_name"],
+            "package_id": int(r["package_id"]),
+            "package_name": r["package_name"],
+            "ends_at": ends.isoformat(),
+            "stage": stage,
+        }
+
+        db.execute(
+            text(
+                """
+                INSERT INTO notifications(
+                    company_id, user_id, ai_system_id, task_id,
+                    type, channel, payload,
+                    status, error, scheduled_at, sent_at, created_at
+                ) VALUES (
+                    :company_id, NULL, NULL, NULL,
+                    'subscription_expiring', 'email', :payload,
+                    'queued', NULL, NULL, NULL, datetime('now')
+                )
+                """
+            ),
+            {
+                "company_id": int(r["company_id"]),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
+            },
+        )
+        created += 1
 
     db.commit()
     return created
@@ -1061,18 +1678,22 @@ def send_pending_notifications(
         params["cid"] = for_company_id
 
     where = " AND ".join(filters)
-    rows = db.execute(
-        text(
-            f"""
+    rows = (
+        db.execute(
+            text(
+                f"""
             SELECT id, company_id, user_id, type, payload
             FROM notifications
             WHERE {where}
             ORDER BY id ASC
             LIMIT :lim
             """
-        ),
-        {**params, "lim": max_batch},
-    ).mappings().all()
+            ),
+            {**params, "lim": max_batch},
+        )
+        .mappings()
+        .all()
+    )
 
     if not rows:
         return 0
@@ -1094,7 +1715,6 @@ def send_pending_notifications(
     # Best-effort audit with templated payload
     try:
         for r in rows:
-            payload = {}
             try:
                 payload = json.loads(r["payload"] or "{}")
             except Exception:
@@ -1130,22 +1750,40 @@ def run_notifications_cycle(
     *,
     company_id: Optional[int] = None,
     scan_hours: int = 24,
-) -> dict:
+) -> Dict[str, Any]:
     """
     Full cycle: tasks + stale evidence + regulatory deadlines + compliance due dates
-    + new assessment versions + newly created incidents (scan).
+    + new assessment versions + newly created incidents (scan) + FRIA nudges
+    + subscriptions expiring.
     Returns detailed counters (and total created for back-compat).
     """
     created_task = generate_due_task_reminders(db, for_company_id=company_id)
     created_evid = generate_stale_evidence_reminders(db, for_company_id=company_id)
-    created_reg  = generate_regulatory_deadline_reminders(db, for_company_id=company_id)
+    created_reg = generate_regulatory_deadline_reminders(db, for_company_id=company_id)
     created_comp = generate_compliance_due_reminders(db, for_company_id=company_id)
-    created_ass  = generate_assessment_version_notifications(db, within_hours_window=scan_hours, for_company_id=company_id)
-    created_inc  = generate_incident_recent_notifications(db, within_hours_window=scan_hours, for_company_id=company_id)
+    created_ass = generate_assessment_version_notifications(
+        db, within_hours_window=scan_hours, for_company_id=company_id
+    )
+    created_inc = generate_incident_recent_notifications(
+        db, within_hours_window=scan_hours, for_company_id=company_id
+    )
+    created_fria = generate_fria_required_reminders(db, for_company_id=company_id)
+    created_subs = generate_subscription_expiring_reminders(
+        db, for_company_id=company_id
+    )
 
     sent = send_pending_notifications(db, for_company_id=company_id)
 
-    total_created = created_task + created_evid + created_reg + created_comp + created_ass + created_inc
+    total_created = (
+        created_task
+        + created_evid
+        + created_reg
+        + created_comp
+        + created_ass
+        + created_inc
+        + created_fria
+        + created_subs
+    )
     return {
         "created_task": created_task,
         "created_stale_evidence": created_evid,
@@ -1153,6 +1791,8 @@ def run_notifications_cycle(
         "created_compliance_due": created_comp,
         "created_assessment_versions": created_ass,
         "created_incidents": created_inc,
+        "created_fria": created_fria,
+        "created_subscription_expiring": created_subs,
         "created": total_created,  # back-compat aggregate
         "sent": sent,
     }
@@ -1164,7 +1804,5 @@ def run_all_notifications_cycle(
     company_id: Optional[int] = None,
     scan_hours: int = 24,
 ) -> dict:
-    """
-    Alias to full cycle (kept for callers that expect run_all_* to exist).
-    """
+    """Alias to full cycle (kept for callers that expect run_all_* to exist)."""
     return run_notifications_cycle(db, company_id=company_id, scan_hours=scan_hours)

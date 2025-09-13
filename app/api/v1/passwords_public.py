@@ -7,6 +7,7 @@ from app.schemas.passwords import ForgotPasswordRequest, ResetPasswordRequest
 
 router = APIRouter()
 
+
 @router.post("/auth/forgot-password")
 def api_forgot_password(
     payload: ForgotPasswordRequest,
@@ -24,6 +25,7 @@ def api_forgot_password(
             return {"msg": "If that email exists, reset instructions were sent"}
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 
 @router.post("/auth/reset-password")
 def api_reset_password(

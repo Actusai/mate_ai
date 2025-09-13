@@ -4,12 +4,20 @@ from sqlalchemy import Column, Integer, DateTime, ForeignKey, String, UniqueCons
 from sqlalchemy.orm import relationship
 from app.db.base import Base  # ⟵ OVO je bitno!
 
+
 class SystemAssignment(Base):
     __tablename__ = "system_assignments"
 
     id = Column(Integer, primary_key=True, index=True)
-    ai_system_id = Column(Integer, ForeignKey("ai_systems.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    ai_system_id = Column(
+        Integer,
+        ForeignKey("ai_systems.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
 
     # npr. "viewer" | "contributor" | "owner"
     role = Column(String(32), nullable=False, default="contributor")

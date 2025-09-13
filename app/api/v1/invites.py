@@ -23,7 +23,9 @@ def api_create_invite(
 ):
     # Non-super može pozivati samo unutar vlastite tvrtke
     if not is_super(current_user) and payload.company_id != current_user.company_id:
-        raise HTTPException(status_code=403, detail="Cannot invite for another company.")
+        raise HTTPException(
+            status_code=403, detail="Cannot invite for another company."
+        )
 
     try:
         invite = create_invite(db, payload)

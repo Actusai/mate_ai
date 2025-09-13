@@ -71,13 +71,17 @@ def create_assignment(
 ):
     _require_super(current_user)
     try:
-        obj = crud.create(db, admin_user_id=payload.admin_user_id, company_id=payload.company_id)
+        obj = crud.create(
+            db, admin_user_id=payload.admin_user_id, company_id=payload.company_id
+        )
         return AdminAssignmentOut.model_validate(obj)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.delete("/admin-assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/admin-assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT
+)
 def delete_assignment(
     assignment_id: int,
     db: Session = Depends(get_db),

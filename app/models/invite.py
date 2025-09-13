@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Boolean
 from datetime import datetime, timedelta
 from app.db.base import Base
 
+
 class Invite(Base):
     __tablename__ = "invites"
 
@@ -13,4 +14,3 @@ class Invite(Base):
     role = Column(String, default="member")  # admin / member / readonly
     status = Column(String, default="pending")  # pending / accepted / expired
     expires_at = Column(DateTime, default=lambda: datetime.utcnow() + timedelta(days=7))
-

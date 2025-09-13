@@ -31,16 +31,21 @@ from app.services.audit import audit_log, ip_from_request
 
 router = APIRouter()
 
+
 # ----------------------------
 # Helpers
 # ----------------------------
 def _get_user(db: Session, user_id: int) -> UserModel | None:
     return db.query(UserModel).filter(UserModel.id == user_id).first()
 
+
 # ----------------------------
 # LIST (enriched)
 # ----------------------------
-@router.get("/ai-systems/{system_id}/assignments", response_model=List[SystemAssignmentDetailedOut])
+@router.get(
+    "/ai-systems/{system_id}/assignments",
+    response_model=List[SystemAssignmentDetailedOut],
+)
 def list_system_assignments(
     system_id: int,
     db: Session = Depends(get_db),
@@ -68,6 +73,7 @@ def list_system_assignments(
         )
     return out
 
+
 # ----------------------------
 # CREATE (enriched)
 # ----------------------------
@@ -93,15 +99,23 @@ def assign_contributor(
     # samo contributor/member; i mora biti iz iste company kao sustav
     role_lower = (target.role or "").lower()
     if role_lower not in {"member", "contributor"}:
-        raise HTTPException(status_code=400, detail="Only contributor/member users can be assigned to a system")
+        raise HTTPException(
+            status_code=400,
+            detail="Only contributor/member users can be assigned to a system",
+        )
     if target.company_id != system.company_id:
-        raise HTTPException(status_code=400, detail="User must belong to the same company as the AI system")
+        raise HTTPException(
+            status_code=400,
+            detail="User must belong to the same company as the AI system",
+        )
 
     create_assignment(db, user_id=user_id, ai_system_id=system_id)
 
     row = get_assignment_with_user(db, user_id=user_id, ai_system_id=system_id)
     if not row:
-        raise HTTPException(status_code=500, detail="Assignment created, but could not be reloaded")
+        raise HTTPException(
+            status_code=500, detail="Assignment created, but could not be reloaded"
+        )
     assignment, usr = row
 
     # AUDIT (best-effort)
@@ -133,10 +147,14 @@ def assign_contributor(
         ),
     )
 
+
 # ----------------------------
 # DELETE
 # ----------------------------
-@router.delete("/ai-systems/{system_id}/assignments/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/ai-systems/{system_id}/assignments/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def unassign_contributor(
     system_id: int,
     user_id: int,

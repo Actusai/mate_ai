@@ -13,15 +13,18 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 
 # --- helpers ---
 
+
 def _ensure_superadmin(user: User) -> None:
     if not bool(getattr(user, "is_super_admin", False)):
         raise HTTPException(status_code=403, detail="Super Admin only")
+
 
 def _safe_int(x: Optional[int]) -> Optional[int]:
     try:
         return int(x) if x is not None else None
     except Exception:
         return None
+
 
 def _safe_json_loads(s: Optional[str]) -> Any:
     if s is None:
@@ -32,23 +35,35 @@ def _safe_json_loads(s: Optional[str]) -> Any:
         # ako nije validan JSON (npr. legacy zapisi), vrati raw string
         return s
 
+
 # --- endpoints ---
+
 
 @router.get("/logs")
 def list_audit_logs(
     # filteri
     company_id: Optional[int] = Query(None, description="Filter po company_id"),
-    user_id: Optional[int] = Query(None, description="Filter po user_id koji je izvršio akciju"),
-    action: Optional[str] = Query(None, description="Exact match po action (npr. TASK_UPDATED)"),
-    entity_type: Optional[str] = Query(None, description="Exact match po entity_type (npr. compliance_task)"),
+    user_id: Optional[int] = Query(
+        None, description="Filter po user_id koji je izvršio akciju"
+    ),
+    action: Optional[str] = Query(
+        None, description="Exact match po action (npr. TASK_UPDATED)"
+    ),
+    entity_type: Optional[str] = Query(
+        None, description="Exact match po entity_type (npr. compliance_task)"
+    ),
     entity_id: Optional[int] = Query(None, description="Exact match po entity_id"),
     date_from: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
     date_to: Optional[str] = Query(None, description="YYYY-MM-DD (inclusive)"),
-    q: Optional[str] = Query(None, description="Full-text like po action/entity_type/meta (SQLite LIKE)"),
+    q: Optional[str] = Query(
+        None, description="Full-text like po action/entity_type/meta (SQLite LIKE)"
+    ),
     # paginacija/sort
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=1000),
-    order_by: Optional[str] = Query("created_at", description="Sort kolona: id|created_at"),
+    order_by: Optional[str] = Query(
+        "created_at", description="Sort kolona: id|created_at"
+    ),
     order_dir: str = Query("desc", regex="^(?i)(asc|desc)$"),
     # deps
     db: Session = Depends(get_db),
@@ -94,7 +109,9 @@ def list_audit_logs(
         params["dto"] = date_to
     if q:
         # jednostavan LIKE na nekoliko polja
-        filters.append("(lower(action) LIKE :qq OR lower(entity_type) LIKE :qq OR lower(meta) LIKE :qq)")
+        filters.append(
+            "(lower(action) LIKE :qq OR lower(entity_type) LIKE :qq OR lower(meta) LIKE :qq)"
+        )
         params["qq"] = f"%{q.lower()}%"
 
     where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""

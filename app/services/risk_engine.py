@@ -43,7 +43,6 @@ FLAG_REFS: Dict[str, List[str]] = {
     "exploits_vulnerabilities": ["Art. 5(1)(b)"],
     "social_scoring_public_authorities": ["Art. 5(1)(c)"],
     "real_time_remote_biometric_id_in_public_for_law_enforcement": ["Art. 5(1)(d)"],
-
     # High-risk (Annex III – indikativno po točkama)
     "critical_infrastructure": ["Annex III"],
     "employment_hr": ["Annex III"],
@@ -59,27 +58,31 @@ FLAG_REFS: Dict[str, List[str]] = {
     "credit_scoring_or_access_to_essential_services": ["Annex III"],
     "essential_private_services": ["Annex III"],
     "insurance_eligibility": ["Annex III"],
-
     # Limited (Art. 52)
     "content_generation_or_chatbot": ["Art. 52"],
     "deepfake_or_synthetic_media": ["Art. 52"],
     "emotion_recognition_non_le": ["Art. 52"],
 }
 
+
 def _collect_true_keys(answers: Dict[str, Any], keys: List[str]) -> List[str]:
     return [k for k in keys if bool(answers.get(k)) is True]
+
 
 def _prohibited(answers: Dict[str, Any]) -> Tuple[bool, List[str]]:
     hits = _collect_true_keys(answers, list(PROHIBITED_KEYS))
     return (len(hits) > 0, hits)
 
+
 def _high_risk(answers: Dict[str, Any]) -> Tuple[bool, List[str]]:
     hits = _collect_true_keys(answers, list(HIGH_RISK_FLAGS))
     return (len(hits) > 0, hits)
 
+
 def _limited_risk(answers: Dict[str, Any]) -> Tuple[bool, List[str]]:
     hits = _collect_true_keys(answers, list(LIMITED_RISK_FLAGS))
     return (len(hits) > 0, hits)
+
 
 def _obligations_for_tier(tier: str, answers: Dict[str, Any]) -> Dict[str, List[str]]:
     """
@@ -93,7 +96,9 @@ def _obligations_for_tier(tier: str, answers: Dict[str, Any]) -> Dict[str, List[
 
     # Provider izvan EU -> ovlašteni predstavnik i EU kontakt
     if answers.get("providers_outside_eu") is True:
-        situational.append("Appoint EU Authorised Representative (provider outside the EU).")
+        situational.append(
+            "Appoint EU Authorised Representative (provider outside the EU)."
+        )
         situational.append("Provide EU contact in notices / documentation.")
 
     if tier == "prohibited":
@@ -132,6 +137,7 @@ def _obligations_for_tier(tier: str, answers: Dict[str, Any]) -> Dict[str, List[
     # minimal_risk
     return {"core": [], "situational": situational}
 
+
 def _tier_references(tier: str) -> List[str]:
     tier = tier.lower()
     if tier == "prohibited":
@@ -141,6 +147,7 @@ def _tier_references(tier: str) -> List[str]:
     if tier == "limited_risk":
         return ["Art. 52"]
     return []
+
 
 def _flag_references(flags: List[str]) -> List[str]:
     refs: List[str] = []
@@ -154,6 +161,7 @@ def _flag_references(flags: List[str]) -> List[str]:
             seen.add(r)
             dedup.append(r)
     return dedup
+
 
 def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -174,7 +182,9 @@ def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "risk_tier": "out_of_scope",
             "obligations": {"core": [], "situational": []},
-            "rationale": ["Out of scope: does not meet definition of 'AI system' (Art. 3)."],
+            "rationale": [
+                "Out of scope: does not meet definition of 'AI system' (Art. 3)."
+            ],
             "references": ["Art. 3"],
         }
 
@@ -219,6 +229,7 @@ def classify_ai_system(answers: Dict[str, Any]) -> Dict[str, Any]:
         "rationale": ["No prohibited/high/limited flags matched."],
         "references": [],
     }
+
 
 # ---------------------------------------------------------------------------
 # (Opcionalno, ali korisno) helper za “Effective Risk”

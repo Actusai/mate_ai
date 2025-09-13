@@ -16,7 +16,8 @@ class RegulatoryDeadlineCreate(BaseModel):
 
     name: constr(strip_whitespace=True, min_length=3, max_length=255)
     kind: Optional[constr(strip_whitespace=True, max_length=50)] = Field(
-        default=None, description="Categorization (e.g., 'ai_act_general', 'registration')"
+        default=None,
+        description="Categorization (e.g., 'ai_act_general', 'registration')",
     )
     due_date: datetime
 

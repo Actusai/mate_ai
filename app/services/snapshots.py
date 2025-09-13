@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+
 def _to_day_str(d: Optional[date | str]) -> str:
     if d is None:
         return datetime.utcnow().strftime("%Y-%m-%d")
@@ -12,14 +13,21 @@ def _to_day_str(d: Optional[date | str]) -> str:
         return d[:10]
     return d.strftime("%Y-%m-%d")
 
-def run_task_stats_daily(db: Session, *, snapshot_day: Optional[date | str] = None, company_id: Optional[int] = None) -> int:
+
+def run_task_stats_daily(
+    db: Session,
+    *,
+    snapshot_day: Optional[date | str] = None,
+    company_id: Optional[int] = None,
+) -> int:
     """
     Snapshot zadataka po AI sustavu za zadani dan (UTC).
     - overdue_cnt: due_date < kraj dana (snapshot_day 23:59:59) i status != 'done'
     - due_next_7_cnt: [kraj dana, kraj dana + 7d)
     """
     day = _to_day_str(snapshot_day)
-    sql = text("""
+    sql = text(
+        """
         INSERT INTO task_stats_daily (
             day, company_id, ai_system_id,
             man_total, man_done,
@@ -56,17 +64,25 @@ def run_task_stats_daily(db: Session, *, snapshot_day: Optional[date | str] = No
             overdue_cnt      = excluded.overdue_cnt,
             due_next_7_cnt   = excluded.due_next_7_cnt,
             created_at       = excluded.created_at
-    """)
+    """
+    )
     res = db.execute(sql, {"day": day, "cid": company_id}).rowcount
     return int(res or 0)
 
-def run_owner_task_stats_daily(db: Session, *, snapshot_day: Optional[date | str] = None, company_id: Optional[int] = None) -> int:
+
+def run_owner_task_stats_daily(
+    db: Session,
+    *,
+    snapshot_day: Optional[date | str] = None,
+    company_id: Optional[int] = None,
+) -> int:
     """
     Snapshot zadataka po vlasniku (owner_user_id) za zadani dan (UTC).
     Bilježi samo redove gdje owner_user_id NIJE NULL.
     """
     day = _to_day_str(snapshot_day)
-    sql = text("""
+    sql = text(
+        """
         INSERT INTO owner_task_stats_daily (
             day, company_id, owner_user_id, total_cnt, overdue_cnt, created_at
         )
@@ -86,11 +102,18 @@ def run_owner_task_stats_daily(db: Session, *, snapshot_day: Optional[date | str
             total_cnt  = excluded.total_cnt,
             overdue_cnt= excluded.overdue_cnt,
             created_at = excluded.created_at
-    """)
+    """
+    )
     res = db.execute(sql, {"day": day, "cid": company_id}).rowcount
     return int(res or 0)
 
-def run_snapshots(db: Session, *, snapshot_day: Optional[date | str] = None, company_id: Optional[int] = None) -> Dict[str, Any]:
+
+def run_snapshots(
+    db: Session,
+    *,
+    snapshot_day: Optional[date | str] = None,
+    company_id: Optional[int] = None,
+) -> Dict[str, Any]:
     day = _to_day_str(snapshot_day)
     a = run_task_stats_daily(db, snapshot_day=day, company_id=company_id)
     b = run_owner_task_stats_daily(db, snapshot_day=day, company_id=company_id)

@@ -8,6 +8,7 @@ from app.models.user import User
 
 router = APIRouter()
 
+
 @router.post("/auth/change-password")
 def api_change_password(
     payload: ChangePasswordRequest,

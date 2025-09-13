@@ -11,6 +11,7 @@ from app.schemas.ai_system import AISystemCreate, AISystemUpdate
 
 # --- Read helpers -------------------------------------------------------------
 
+
 def get_system(db: Session, system_id: int) -> Optional[AISystem]:
     return db.query(AISystem).filter(AISystem.id == system_id).first()
 
@@ -39,15 +40,12 @@ def get_all_systems(
     limit: int = 50,
 ) -> List[AISystem]:
     return (
-        db.query(AISystem)
-        .order_by(AISystem.id.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
+        db.query(AISystem).order_by(AISystem.id.desc()).offset(skip).limit(limit).all()
     )
 
 
 # --- Create / Update / Delete ------------------------------------------------
+
 
 def create_system(db: Session, payload: AISystemCreate) -> AISystem:
     # Ensure company exists
@@ -93,7 +91,9 @@ def update_system(
     # ako se promijenio compliance_status ili compliance_score -> osvježi timestamp
     new_status = getattr(obj, "compliance_status", None)
     new_score = getattr(obj, "compliance_score", None)
-    if (new_status is not None and new_status != old_status) or (new_score is not None and new_score != old_score):
+    if (new_status is not None and new_status != old_status) or (
+        new_score is not None and new_score != old_score
+    ):
         obj.compliance_updated_at = datetime.utcnow()
 
     # svaka izmjena bilježi aktivnost

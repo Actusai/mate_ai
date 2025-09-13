@@ -12,7 +12,13 @@ db = SessionLocal()
 # Ensure there is at least one company to attach the user to
 company = db.query(Company).filter(Company.id == 1).first()
 if not company:
-    company = Company(id=1, name="Test Company", address="N/A", country="N/A", email="contact@testco.example")
+    company = Company(
+        id=1,
+        name="Test Company",
+        address="N/A",
+        country="N/A",
+        email="contact@testco.example",
+    )
     db.add(company)
     db.commit()
     db.refresh(company)

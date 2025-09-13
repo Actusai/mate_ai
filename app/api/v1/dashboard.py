@@ -4,7 +4,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.auth import get_db, get_current_user
-from app.core.scoping import is_super, is_staff_admin, is_client_admin, is_contributor, get_assigned_company_ids, get_assigned_system_ids
+from app.core.scoping import (
+    is_super,
+    is_staff_admin,
+    is_client_admin,
+    is_contributor,
+    get_assigned_company_ids,
+    get_assigned_system_ids,
+)
 from app.models.user import User
 from app.models.company import Company
 from app.models.ai_system import AISystem
@@ -14,7 +21,14 @@ router = APIRouter()
 
 # ----- helpers -----
 
-RISK_BUCKETS = ("prohibited", "high_risk", "limited_risk", "minimal_risk", "not_assessed")
+RISK_BUCKETS = (
+    "prohibited",
+    "high_risk",
+    "limited_risk",
+    "minimal_risk",
+    "not_assessed",
+)
+
 
 def _bucket_for(risk_tier: str | None) -> str:
     """
@@ -31,10 +45,13 @@ def _bucket_for(risk_tier: str | None) -> str:
     # fallback (neočekivane vrijednosti) -> not_assessed
     return "not_assessed"
 
+
 def _empty_distribution() -> Dict[str, int]:
     return {k: 0 for k in RISK_BUCKETS}
 
+
 # ----- endpoint: auto-scope summary -----
+
 
 @router.get("/dashboard/summary")
 def dashboard_summary(
@@ -56,9 +73,7 @@ def dashboard_summary(
         companies_count = db.query(Company).count()
         ai_systems = db.query(AISystem).all()
         ai_systems_count = len(ai_systems)
-        contributors_count = (
-            db.query(SystemAssignment.user_id).distinct().count()
-        )
+        contributors_count = db.query(SystemAssignment.user_id).distinct().count()
         for s in ai_systems:
             dist[_bucket_for(s.risk_tier)] += 1
         return {
@@ -81,7 +96,9 @@ def dashboard_summary(
                 "risk_distribution": dist,
             }
         companies_count = db.query(Company).filter(Company.id.in_(company_ids)).count()
-        ai_systems = db.query(AISystem).filter(AISystem.company_id.in_(company_ids)).all()
+        ai_systems = (
+            db.query(AISystem).filter(AISystem.company_id.in_(company_ids)).all()
+        )
         ai_systems_count = len(ai_systems)
         # unique contributors over those systems
         contributors_count = (
@@ -105,7 +122,11 @@ def dashboard_summary(
         if not current_user.company_id:
             raise HTTPException(status_code=400, detail="User has no company assigned.")
         companies_count = 1
-        ai_systems = db.query(AISystem).filter(AISystem.company_id == current_user.company_id).all()
+        ai_systems = (
+            db.query(AISystem)
+            .filter(AISystem.company_id == current_user.company_id)
+            .all()
+        )
         ai_systems_count = len(ai_systems)
         contributors_count = (
             db.query(SystemAssignment.user_id)
@@ -134,7 +155,9 @@ def dashboard_summary(
                 "contributors_count": 1,  # barem on sam :)
                 "risk_distribution": dist,
             }
-        ai_systems = db.query(AISystem).filter(AISystem.id.in_(assigned_system_ids)).all()
+        ai_systems = (
+            db.query(AISystem).filter(AISystem.id.in_(assigned_system_ids)).all()
+        )
         for s in ai_systems:
             dist[_bucket_for(s.risk_tier)] += 1
         return {

@@ -49,7 +49,9 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
 
     # Deactivated
     if getattr(user, "is_active", True) is False:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled"
+        )
 
     # Already locked?
     if _is_locked(user):
@@ -61,7 +63,9 @@ def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
     # Password check
     if verify_password(password, user.hashed_password):
         # Success → reset counters and lock (if any)
-        if getattr(user, "failed_login_attempts", 0) or getattr(user, "locked_until", None):
+        if getattr(user, "failed_login_attempts", 0) or getattr(
+            user, "locked_until", None
+        ):
             user.failed_login_attempts = 0
             user.locked_until = None
             db.add(user)
@@ -118,7 +122,9 @@ def get_current_user(
 
     # Deactivated?
     if getattr(user, "is_active", True) is False:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled"
+        )
 
     # Locked? (by design you could allow existing token; here we reject)
     if _is_locked(user):

@@ -47,7 +47,12 @@ def _load_system_or_404(db: Session, system_id: int) -> AISystem:
 def _answers_dict(row) -> Dict[str, Any]:
     try:
         import json
-        return json.loads(row.answers_json or "{}") if getattr(row, "answers_json", None) else {}
+
+        return (
+            json.loads(row.answers_json or "{}")
+            if getattr(row, "answers_json", None)
+            else {}
+        )
     except Exception:
         return {}
 
@@ -90,7 +95,9 @@ def get_latest_assessment(
     return to_out(row)
 
 
-@router.get("/ai-systems/{system_id}/assessments", response_model=List[AIAssessmentListItem])
+@router.get(
+    "/ai-systems/{system_id}/assessments", response_model=List[AIAssessmentListItem]
+)
 def list_assessments(
     system_id: int,
     db: Session = Depends(get_db),
@@ -132,7 +139,10 @@ def list_assessments(
     ]
 
 
-@router.get("/ai-systems/{system_id}/assessments/{assessment_id}", response_model=AIAssessmentOut)
+@router.get(
+    "/ai-systems/{system_id}/assessments/{assessment_id}",
+    response_model=AIAssessmentOut,
+)
 def get_assessment_version(
     system_id: int,
     assessment_id: int,
@@ -150,7 +160,10 @@ def get_assessment_version(
     return to_out(row)
 
 
-@router.get("/ai-systems/{system_id}/assessments/{base_id}/diff/{compare_id}", response_model=AIAssessmentDiff)
+@router.get(
+    "/ai-systems/{system_id}/assessments/{base_id}/diff/{compare_id}",
+    response_model=AIAssessmentDiff,
+)
 def diff_assessments(
     system_id: int,
     base_id: int,
@@ -206,7 +219,11 @@ def diff_assessments(
     )
 
 
-@router.post("/ai-systems/{system_id}/assessment/save", response_model=AIAssessmentOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/ai-systems/{system_id}/assessment/save",
+    response_model=AIAssessmentOut,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_or_update_assessment(
     system_id: int,
     payload: AIAssessmentCreate,
@@ -232,7 +249,11 @@ def create_or_update_assessment(
 # -----------------------------
 # Approve assessment (AR or SuperAdmin)
 # -----------------------------
-@router.post("/assessments/{assessment_id}/approve", response_model=AssessmentApprovalOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/assessments/{assessment_id}/approve",
+    response_model=AssessmentApprovalOut,
+    status_code=status.HTTP_201_CREATED,
+)
 def approve_assessment(
     request: Request,  # must precede defaulted params for FastAPI/Pydantic
     assessment_id: int = Path(..., ge=1),
@@ -260,7 +281,7 @@ def approve_assessment(
         if not ar_uid or int(ar_uid) != int(current_user.id):
             raise HTTPException(
                 status_code=403,
-                detail="Only the system's Authorized Representative or a Super Admin may approve assessments."
+                detail="Only the system's Authorized Representative or a Super Admin may approve assessments.",
             )
 
     # 4) Insert approval record (protect against duplicates if uniqueness is enabled at DB level)
@@ -276,7 +297,9 @@ def approve_assessment(
     except IntegrityError:
         db.rollback()
         # Likely unique constraint violation (one approval per assessment)
-        raise HTTPException(status_code=409, detail="This assessment already has an approval.")
+        raise HTTPException(
+            status_code=409, detail="This assessment already has an approval."
+        )
     db.refresh(approval)
 
     # 5) Optionally mirror onto assessment fields if they exist (idempotent/best-effort)
@@ -287,6 +310,7 @@ def approve_assessment(
             changed = True
         if hasattr(assessment, "approved_at"):
             from datetime import datetime as _dt
+
             assessment.approved_at = _dt.utcnow()
             changed = True
         if hasattr(assessment, "approval_note") and note is not None:
@@ -337,7 +361,9 @@ def approve_assessment(
 # -----------------------------
 # List approvals for an assessment (RBAC: company read)
 # -----------------------------
-@router.get("/assessments/{assessment_id}/approvals", response_model=List[AssessmentApprovalOut])
+@router.get(
+    "/assessments/{assessment_id}/approvals", response_model=List[AssessmentApprovalOut]
+)
 def list_assessment_approvals(
     assessment_id: int = Path(..., ge=1),
     db: Session = Depends(get_db),

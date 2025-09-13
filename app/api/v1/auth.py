@@ -16,9 +16,11 @@ router = APIRouter()
 MAX_FAILED = 3
 LOCK_MINUTES = 15
 
+
 def _utcnow():
     # tz-aware UTC, ali pohranjujemo kao naive UTC (SQLite-friendly)
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 @router.post("/login")
 def login(
@@ -55,7 +57,7 @@ def login(
 
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Your account is temporarily locked due to too many failed sign-in attempts. Please try again in {LOCK_MINUTES} minutes."
+                detail=f"Your account is temporarily locked due to too many failed sign-in attempts. Please try again in {LOCK_MINUTES} minutes.",
             )
 
     # 3) Provjera lozinke

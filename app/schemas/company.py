@@ -41,8 +41,13 @@ class CompanyBase(BaseModel):
             if self.is_authorized_representative:
                 # korisnik je eksplicitno označio AR; ne prepisuj ako je već neki drugi tip
                 if self.company_type == "deployer" or self.company_type is None:
-                    object.__setattr__(self, "company_type", "authorized_representative")
-            if self.company_type == "authorized_representative" and not self.is_authorized_representative:
+                    object.__setattr__(
+                        self, "company_type", "authorized_representative"
+                    )
+            if (
+                self.company_type == "authorized_representative"
+                and not self.is_authorized_representative
+            ):
                 object.__setattr__(self, "is_authorized_representative", True)
         except Exception:
             # ne ruši validaciju zbog sync logike

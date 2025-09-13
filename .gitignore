@@ -1,11 +1,27 @@
+# venv / cache
 venv/
 __pycache__/
 *.pyc
-.env
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
 .DS_Store
 
-# Local dev artifacts
+# local env & secrets
+.env
+.env.local
+app/.env
+app/.env.local
+
+# local db / files
 *.db
 *.sqlite
-*.sqlite3
-.tables
+/var/app/docs/
+/var/app/docs/packs/
+
+# coverage
+.coverage
+htmlcov/

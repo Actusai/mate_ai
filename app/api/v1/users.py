@@ -80,19 +80,29 @@ def _ensure_actor_can_touch_target(current_user: User, target: User) -> None:
     """
     Dodatna zaštita: non-super ne smije dirati super_admin korisnika.
     """
-    target_is_super = ((getattr(target, "role", "") or "").lower() == ROLE_SUPER) or bool(getattr(target, "is_super_admin", False))
+    target_is_super = (
+        (getattr(target, "role", "") or "").lower() == ROLE_SUPER
+    ) or bool(getattr(target, "is_super_admin", False))
     if target_is_super and not is_super_admin(current_user):
-        raise HTTPException(status_code=403, detail="Only SuperAdmin can modify a super_admin")
+        raise HTTPException(
+            status_code=403, detail="Only SuperAdmin can modify a super_admin"
+        )
 
 
 # ---- ROUTES ----
 
+
 @router.get("/users")
 def list_users(
-    company_id: Optional[int] = Query(None, description="Ako je SuperAdmin, može specificirati company_id; inače se ignorira"),
+    company_id: Optional[int] = Query(
+        None,
+        description="Ako je SuperAdmin, može specificirati company_id; inače se ignorira",
+    ),
     q: Optional[str] = Query(None, description="Pretraga po imenu ili emailu"),
     role: Optional[str] = Query(None, description="Filter po roli (admin/member/...)"),
-    is_active: Optional[bool] = Query(None, description="Filter po aktivnim korisnicima"),
+    is_active: Optional[bool] = Query(
+        None, description="Filter po aktivnim korisnicima"
+    ),
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -115,7 +125,9 @@ def list_users(
 
     if q:
         like = f"%{q.lower()}%"
-        qset = qset.filter(func.lower(User.email).like(like) | func.lower(User.full_name).like(like))
+        qset = qset.filter(
+            func.lower(User.email).like(like) | func.lower(User.full_name).like(like)
+        )
 
     if role:
         qset = qset.filter(func.lower(User.role) == role.lower())
@@ -125,9 +137,9 @@ def list_users(
 
     users = (
         qset.order_by(User.full_name.asc(), User.email.asc())
-            .offset(skip)
-            .limit(limit)
-            .all()
+        .offset(skip)
+        .limit(limit)
+        .all()
     )
     return [_sanitize_user_out(u) for u in users]
 
@@ -162,7 +174,7 @@ def update_user(
         ensure_company_access(current_user, getattr(u, "company_id", None))
     _ensure_actor_can_touch_target(current_user, u)
 
-    is_self = (user_id == getattr(current_user, "id", None))
+    is_self = user_id == getattr(current_user, "id", None)
     can_manage = _role_allows_manage_company(current_user)
 
     # Odredi allowed polja
@@ -178,22 +190,40 @@ def update_user(
 
     # Odbaci osjetljiva polja + sve što nije u allowlisti
     incoming = dict(payload or {})
-    data: Dict[str, Any] = {k: v for k, v in incoming.items() if k in allowed_fields and k not in SENSITIVE_FORBIDDEN}
+    data: Dict[str, Any] = {
+        k: v
+        for k, v in incoming.items()
+        if k in allowed_fields and k not in SENSITIVE_FORBIDDEN
+    }
 
     # Dodatna pravila:
     # - promjena company_id samo SuperAdmin
     if "company_id" in data and not is_super_admin(current_user):
-        raise HTTPException(status_code=403, detail="Only SuperAdmin can change company_id")
+        raise HTTPException(
+            status_code=403, detail="Only SuperAdmin can change company_id"
+        )
 
     # - promjenu role dopuštamo samo onima koji mogu 'manage company'
     if "role" in data:
         if not can_manage:
-            raise HTTPException(status_code=403, detail="Only admins can change user roles")
+            raise HTTPException(
+                status_code=403, detail="Only admins can change user roles"
+            )
         # postavljanje ili skidanje super_admin role dopušteno samo SuperAdminu
-        if data["role"] and str(data["role"]).lower() == ROLE_SUPER and not is_super_admin(current_user):
-            raise HTTPException(status_code=403, detail="Only SuperAdmin can assign super_admin role")
-        if (getattr(u, "role", "") or "").lower() == ROLE_SUPER and not is_super_admin(current_user):
-            raise HTTPException(status_code=403, detail="Only SuperAdmin can modify a super_admin")
+        if (
+            data["role"]
+            and str(data["role"]).lower() == ROLE_SUPER
+            and not is_super_admin(current_user)
+        ):
+            raise HTTPException(
+                status_code=403, detail="Only SuperAdmin can assign super_admin role"
+            )
+        if (getattr(u, "role", "") or "").lower() == ROLE_SUPER and not is_super_admin(
+            current_user
+        ):
+            raise HTTPException(
+                status_code=403, detail="Only SuperAdmin can modify a super_admin"
+            )
 
     # Ako nema promjena, vrati korisnika
     if not data:
@@ -215,7 +245,8 @@ def update_user(
     try:
         audit_log(
             db,
-            company_id=getattr(u, "company_id", None) or getattr(current_user, "company_id", 0),
+            company_id=getattr(u, "company_id", None)
+            or getattr(current_user, "company_id", 0),
             user_id=getattr(current_user, "id", None),
             action="USER_UPDATED",
             entity_type="user",
@@ -252,8 +283,12 @@ def disable_user(
     _ensure_actor_can_touch_target(current_user, u)
 
     # Sigurnost: ne dopuštaj samodiskvalifikaciju non-super korisniku
-    if user_id == getattr(current_user, "id", None) and not is_super_admin(current_user):
-        raise HTTPException(status_code=400, detail="You cannot disable your own account")
+    if user_id == getattr(current_user, "id", None) and not is_super_admin(
+        current_user
+    ):
+        raise HTTPException(
+            status_code=400, detail="You cannot disable your own account"
+        )
 
     # Poslovna promjena
     u.is_active = False
@@ -265,7 +300,8 @@ def disable_user(
     try:
         audit_log(
             db,
-            company_id=getattr(u, "company_id", None) or getattr(current_user, "company_id", 0),
+            company_id=getattr(u, "company_id", None)
+            or getattr(current_user, "company_id", 0),
             user_id=getattr(current_user, "id", None),
             action="USER_DISABLED",
             entity_type="user",
@@ -305,7 +341,8 @@ def enable_user(
     try:
         audit_log(
             db,
-            company_id=getattr(u, "company_id", None) or getattr(current_user, "company_id", 0),
+            company_id=getattr(u, "company_id", None)
+            or getattr(current_user, "company_id", 0),
             user_id=getattr(current_user, "id", None),
             action="USER_ENABLED",
             entity_type="user",
@@ -337,8 +374,12 @@ def delete_user(
     _ensure_actor_can_touch_target(current_user, u)
 
     # Sigurnost: ne dopuštaj samobrisanje non-superu (po želji možeš i SuperAdminu zabraniti)
-    if user_id == getattr(current_user, "id", None) and not is_super_admin(current_user):
-        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    if user_id == getattr(current_user, "id", None) and not is_super_admin(
+        current_user
+    ):
+        raise HTTPException(
+            status_code=400, detail="You cannot delete your own account"
+        )
 
     # Snapshot minimalnih podataka za audit prije brisanja
     meta_snapshot = {
@@ -358,7 +399,8 @@ def delete_user(
     try:
         audit_log(
             db,
-            company_id=meta_snapshot.get("company_id") or getattr(current_user, "company_id", 0),
+            company_id=meta_snapshot.get("company_id")
+            or getattr(current_user, "company_id", 0),
             user_id=getattr(current_user, "id", None),
             action="USER_DELETED",
             entity_type="user",
@@ -370,4 +412,4 @@ def delete_user(
     except Exception:
         db.rollback()
 
-    return Response(status_code=status.HTTP_204_NO_CONTENT) 
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

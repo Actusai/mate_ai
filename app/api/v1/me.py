@@ -16,6 +16,7 @@ router = APIRouter()
 
 # ---- Schemas (lokalno za ovaj router) ---------------------------------------
 
+
 class MeOut(BaseModel):
     id: int
     email: str
@@ -34,6 +35,7 @@ class MeAssignmentOut(BaseModel):
 
 # ---- Endpoints ---------------------------------------------------------------
 
+
 @router.get("/me", response_model=MeOut)
 def get_me(
     current_user: User = Depends(get_current_user),
@@ -48,7 +50,9 @@ def get_me(
 
 @router.get("/me/assignments", response_model=List[MeAssignmentOut])
 def list_my_assignments(
-    include_system: bool = Query(False, description="Ako je true, vraća i sažetak AI sustava."),
+    include_system: bool = Query(
+        False, description="Ako je true, vraća i sažetak AI sustava."
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -62,12 +66,14 @@ def list_my_assignments(
     out: List[MeAssignmentOut] = []
     if not include_system:
         for r in rows:
-            out.append(MeAssignmentOut(
-                id=r.id,
-                user_id=r.user_id,
-                ai_system_id=r.ai_system_id,
-                created_at=r.created_at,
-            ))
+            out.append(
+                MeAssignmentOut(
+                    id=r.id,
+                    user_id=r.user_id,
+                    ai_system_id=r.ai_system_id,
+                    created_at=r.created_at,
+                )
+            )
         return out
 
     # include_system = True → pridruži osnovne info o sustavu
@@ -75,11 +81,7 @@ def list_my_assignments(
     system_ids = [r.ai_system_id for r in rows]
     systems_map: Dict[int, AISystem] = {}
     if system_ids:
-        systems = (
-            db.query(AISystem)
-            .filter(AISystem.id.in_(system_ids))
-            .all()
-        )
+        systems = db.query(AISystem).filter(AISystem.id.in_(system_ids)).all()
         systems_map = {s.id: s for s in systems}
 
     for r in rows:
@@ -95,11 +97,13 @@ def list_my_assignments(
                 "risk_tier": s.risk_tier,
                 "updated_at": s.updated_at,
             }
-        out.append(MeAssignmentOut(
-            id=r.id,
-            user_id=r.user_id,
-            ai_system_id=r.ai_system_id,
-            created_at=r.created_at,
-            system=system_summary,
-        ))
+        out.append(
+            MeAssignmentOut(
+                id=r.id,
+                user_id=r.user_id,
+                ai_system_id=r.ai_system_id,
+                created_at=r.created_at,
+                system=system_summary,
+            )
+        )
     return out

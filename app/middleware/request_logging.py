@@ -45,12 +45,18 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.ignored_prefixes = tuple(ignored_prefixes)
 
-    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
         path = request.url.path
         method = request.method.upper()
 
         # Generate / propagate trace_id early
-        trace_id = getattr(request.state, "trace_id", None) or request.headers.get("x-request-id") or uuid.uuid4().hex
+        trace_id = (
+            getattr(request.state, "trace_id", None)
+            or request.headers.get("x-request-id")
+            or uuid.uuid4().hex
+        )
         try:
             request.state.trace_id = trace_id
         except Exception:
@@ -58,7 +64,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             pass
 
         # Skip logging for OPTIONS and ignored paths (still set X-Request-ID)
-        skip = method == "OPTIONS" or any(path.startswith(p) for p in self.ignored_prefixes)
+        skip = method == "OPTIONS" or any(
+            path.startswith(p) for p in self.ignored_prefixes
+        )
 
         start = time.perf_counter()
         try:

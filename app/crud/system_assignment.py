@@ -6,20 +6,30 @@ from app.models.user import User as UserModel
 
 from app.models.system_assignment import SystemAssignment
 
-def get_assignment(db: Session, user_id: int, ai_system_id: int) -> Optional[SystemAssignment]:
+
+def get_assignment(
+    db: Session, user_id: int, ai_system_id: int
+) -> Optional[SystemAssignment]:
     return (
         db.query(SystemAssignment)
-        .filter(SystemAssignment.user_id == user_id, SystemAssignment.ai_system_id == ai_system_id)
+        .filter(
+            SystemAssignment.user_id == user_id,
+            SystemAssignment.ai_system_id == ai_system_id,
+        )
         .first()
     )
 
-def get_assignments_for_system(db: Session, ai_system_id: int) -> List[SystemAssignment]:
+
+def get_assignments_for_system(
+    db: Session, ai_system_id: int
+) -> List[SystemAssignment]:
     return (
         db.query(SystemAssignment)
         .filter(SystemAssignment.ai_system_id == ai_system_id)
         .order_by(SystemAssignment.id.desc())
         .all()
     )
+
 
 def get_assignments_for_user(db: Session, user_id: int) -> List[SystemAssignment]:
     return (
@@ -28,6 +38,7 @@ def get_assignments_for_user(db: Session, user_id: int) -> List[SystemAssignment
         .order_by(SystemAssignment.id.desc())
         .all()
     )
+
 
 def create_assignment(db: Session, user_id: int, ai_system_id: int) -> SystemAssignment:
     existing = get_assignment(db, user_id, ai_system_id)
@@ -39,13 +50,20 @@ def create_assignment(db: Session, user_id: int, ai_system_id: int) -> SystemAss
     db.refresh(obj)
     return obj
 
+
 def delete_assignment(db: Session, obj: SystemAssignment) -> None:
     db.delete(obj)
     db.commit()
 
+
 def get_assigned_system_ids_for_user(db: Session, user_id: int) -> List[int]:
-    rows = db.query(SystemAssignment.ai_system_id).filter(SystemAssignment.user_id == user_id).all()
+    rows = (
+        db.query(SystemAssignment.ai_system_id)
+        .filter(SystemAssignment.user_id == user_id)
+        .all()
+    )
     return [sid for (sid,) in rows]
+
 
 # NOVO: lista assignmenta s učitanim User objektom (za jedan AI sustav)
 def get_assignments_with_user_for_system(
@@ -59,6 +77,7 @@ def get_assignments_with_user_for_system(
         .all()
     )
     return rows
+
 
 # NOVO: jedan assignment s userom (npr. za povrat nakon create)
 def get_assignment_with_user(

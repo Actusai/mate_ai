@@ -20,6 +20,7 @@ from app.models.password_reset import PasswordReset
 
 # --- helpers -----------------------------------------------------------------
 
+
 def _normalize_company_type(val: Optional[str]) -> str:
     """
     Normalize to one of: 'authorized_representative' | 'deployer' | 'developer'
@@ -55,18 +56,13 @@ def _enable_sqlite_fk_if_needed(db: Session) -> None:
 
 # --- CRUD --------------------------------------------------------------------
 
+
 def get_company(db: Session, company_id: int) -> Optional[Company]:
     return db.get(Company, company_id)
 
 
 def list_companies(db: Session, skip: int = 0, limit: int = 50) -> List[Company]:
-    return (
-        db.query(Company)
-        .order_by(Company.id.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    return db.query(Company).order_by(Company.id.desc()).offset(skip).limit(limit).all()
 
 
 def create_company(db: Session, data: CompanyCreate) -> Company:
@@ -109,9 +105,9 @@ def update_company(db: Session, obj: Company, data: CompanyUpdate) -> Company:
     if data.website is not None:
         obj.website = data.website
     if data.contact_email is not None:
-            obj.contact_email = data.contact_email
-            # legacy email polje poravnavamo ako ga koristite negdje u UI-u
-            obj.email = data.contact_email
+        obj.contact_email = data.contact_email
+        # legacy email polje poravnavamo ako ga koristite negdje u UI-u
+        obj.email = data.contact_email
     if data.contact_phone is not None:
         obj.contact_phone = data.contact_phone
     if data.contact_person is not None:
@@ -125,10 +121,13 @@ def update_company(db: Session, obj: Company, data: CompanyUpdate) -> Company:
 
     if data.is_authorized_representative is not None or new_company_type is not None:
         # derivirajmo ponovno AR flag
-        effective_type = new_company_type if new_company_type is not None else (obj.company_type or "")
+        effective_type = (
+            new_company_type
+            if new_company_type is not None
+            else (obj.company_type or "")
+        )
         obj.is_authorized_representative = _derive_is_ar_flag(
-            effective_type,
-            data.is_authorized_representative
+            effective_type, data.is_authorized_representative
         )
 
     db.commit()
@@ -140,48 +139,72 @@ def delete_company(db: Session, company: Company) -> None:
     cid = company.id
 
     # 1) Skupi sve ai_system_id za ovu kompaniju
-    system_ids = [sid for (sid,) in db.query(AISystem.id).filter(AISystem.company_id == cid).all()]
+    system_ids = [
+        sid for (sid,) in db.query(AISystem.id).filter(AISystem.company_id == cid).all()
+    ]
 
     # 2) Briši “najdublje” tablice koje ovise o sustavima / kompaniji
     if system_ids:
         # assessments vezani na sustave ili direktno na company_id
-        db.query(AIAssessment).filter(AIAssessment.ai_system_id.in_(system_ids)).delete(synchronize_session=False)
-    db.query(AIAssessment).filter(AIAssessment.company_id == cid).delete(synchronize_session=False)
+        db.query(AIAssessment).filter(AIAssessment.ai_system_id.in_(system_ids)).delete(
+            synchronize_session=False
+        )
+    db.query(AIAssessment).filter(AIAssessment.company_id == cid).delete(
+        synchronize_session=False
+    )
 
     # assignments (ako SystemAssignment nema company_id, briši preko system_ids)
     try:
         # Ako model IMA company_id kolonu:
-        db.query(SystemAssignment).filter(SystemAssignment.company_id == cid).delete(synchronize_session=False)
+        db.query(SystemAssignment).filter(SystemAssignment.company_id == cid).delete(
+            synchronize_session=False
+        )
     except Exception:
         # Ako NEMA company_id: briši prema ai_system_id
         if system_ids:
-            db.query(SystemAssignment).filter(SystemAssignment.ai_system_id.in_(system_ids)).delete(synchronize_session=False)
+            db.query(SystemAssignment).filter(
+                SystemAssignment.ai_system_id.in_(system_ids)
+            ).delete(synchronize_session=False)
 
     # compliance tasks (ako ih imaš)
     try:
-        db.query(ComplianceTask).filter(ComplianceTask.company_id == cid).delete(synchronize_session=False)
+        db.query(ComplianceTask).filter(ComplianceTask.company_id == cid).delete(
+            synchronize_session=False
+        )
     except Exception:
         pass
 
     # admin assignments
-    db.query(AdminAssignment).filter(AdminAssignment.company_id == cid).delete(synchronize_session=False)
+    db.query(AdminAssignment).filter(AdminAssignment.company_id == cid).delete(
+        synchronize_session=False
+    )
 
     # company_packages
-    db.query(CompanyPackage).filter(CompanyPackage.company_id == cid).delete(synchronize_session=False)
+    db.query(CompanyPackage).filter(CompanyPackage.company_id == cid).delete(
+        synchronize_session=False
+    )
 
     # invites (ako postoji)
     try:
-        db.query(Invite).filter(Invite.company_id == cid).delete(synchronize_session=False)
+        db.query(Invite).filter(Invite.company_id == cid).delete(
+            synchronize_session=False
+        )
     except Exception:
         pass
 
     # users (svi korisnici u toj kompaniji)
     # Moguće je da PasswordReset ovisi o User-u, pa se ovo mora obrisati prije Usera
-    db.query(PasswordReset).filter(PasswordReset.user_id.in_([u.id for u in db.query(User).filter(User.company_id == cid).all()])).delete(synchronize_session=False)
+    db.query(PasswordReset).filter(
+        PasswordReset.user_id.in_(
+            [u.id for u in db.query(User).filter(User.company_id == cid).all()]
+        )
+    ).delete(synchronize_session=False)
     db.query(User).filter(User.company_id == cid).delete(synchronize_session=False)
 
     # ai_systems (na kraju djeca sustava)
-    db.query(AISystem).filter(AISystem.company_id == cid).delete(synchronize_session=False)
+    db.query(AISystem).filter(AISystem.company_id == cid).delete(
+        synchronize_session=False
+    )
 
     # 3) Konačno obriši company
     db.query(Company).filter(Company.id == cid).delete(synchronize_session=False)

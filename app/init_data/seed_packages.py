@@ -41,13 +41,14 @@ AR_PACKAGES = [
     {
         "name": "AR Enterprise",
         "description": "All features. Unlimited clients & team. Custom pricing.",
-        "price": 0.0,   # custom
+        "price": 0.0,  # custom
         "ai_system_limit": 0,
-        "user_limit": 0,     # 0 = unlimited
-        "client_limit": 0,   # 0 = unlimited
+        "user_limit": 0,  # 0 = unlimited
+        "client_limit": 0,  # 0 = unlimited
         "is_ar_only": 1,
     },
 ]
+
 
 def seed_ar_packages():
     db = SessionLocal()
@@ -62,6 +63,7 @@ def seed_ar_packages():
         print(f"✅ AR packages seeded (+{created} new).")
     finally:
         db.close()
+
 
 if __name__ == "__main__":
     seed_ar_packages()

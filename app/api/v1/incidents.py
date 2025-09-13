@@ -14,7 +14,10 @@ from app.models.incident import Incident
 from app.models.ai_system import AISystem
 
 from app.schemas.incident import (
-    IncidentCreate, IncidentUpdate, IncidentOut, IncidentStatus
+    IncidentCreate,
+    IncidentUpdate,
+    IncidentOut,
+    IncidentStatus,
 )
 
 # RBAC / scoping helpers
@@ -65,7 +68,9 @@ def create_incident(
     """
     system = _load_system(db, payload.ai_system_id)
     if system.company_id != payload.company_id:
-        raise HTTPException(status_code=400, detail="company_id does not match AI system")
+        raise HTTPException(
+            status_code=400, detail="company_id does not match AI system"
+        )
 
     # RBAC: limited write is enough to report/create an incident
     ensure_system_write_limited(db, current_user, system.id)
@@ -202,12 +207,7 @@ def list_incidents(
     if date_to:
         q = q.filter(Incident.occurred_at <= date_to)
 
-    rows = (
-        q.order_by(Incident.created_at.desc())
-        .offset(skip)
-        .limit(limit)
-        .all()
-    )
+    rows = q.order_by(Incident.created_at.desc()).offset(skip).limit(limit).all()
     return [_to_out(r) for r in rows]
 
 
@@ -251,7 +251,7 @@ def update_incident(
                 "changes": data,
                 "ai_system_id": obj.ai_system_id,
                 "old_status": before_status,
-                "new_status": obj.status
+                "new_status": obj.status,
             },
             ip=ip_from_request(request),
         )
@@ -350,7 +350,9 @@ def export_incidents(
         if company_id is None:
             company_id = getattr(current_user, "company_id", None)
         if company_id is None:
-            raise HTTPException(status_code=403, detail="Company scope required for non-super users")
+            raise HTTPException(
+                status_code=403, detail="Company scope required for non-super users"
+            )
         ensure_company_access(current_user, company_id)
 
     # Build query
@@ -374,7 +376,9 @@ def export_incidents(
 
     rows: List[Incident] = q.order_by(Incident.created_at.desc()).limit(limit).all()
     if not rows:
-        raise HTTPException(status_code=404, detail="No data found for the given parameters")
+        raise HTTPException(
+            status_code=404, detail="No data found for the given parameters"
+        )
 
     # Shape rows
     def rowdict(x: Incident) -> Dict[str, Any]:
@@ -429,7 +433,9 @@ def export_incidents(
         try:
             from openpyxl import Workbook
         except Exception:
-            raise HTTPException(status_code=400, detail="XLSX export requires 'openpyxl' package.")
+            raise HTTPException(
+                status_code=400, detail="XLSX export requires 'openpyxl' package."
+            )
 
         wb = Workbook()
         ws = wb.active
@@ -440,6 +446,7 @@ def export_incidents(
             ws.append([r.get(k) for k in cols])
 
         import io
+
         stream = io.BytesIO()
         wb.save(stream)
         stream.seek(0)
@@ -477,6 +484,7 @@ def export_incidents(
 
     # CSV (default)
     import io, csv
+
     out = io.StringIO()
     cols = list(data[0].keys())
     writer = csv.DictWriter(out, fieldnames=cols)

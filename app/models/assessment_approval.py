@@ -15,6 +15,7 @@ class AssessmentApproval(Base):
     Stores a single approval action for an AI assessment.
     FK constraints intentionally deferred to Alembic migration (same approach as incidents).
     """
+
     __tablename__ = "assessment_approvals"
 
     # Optional uniqueness (enable after running Alembic migration)

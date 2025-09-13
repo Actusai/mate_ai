@@ -45,14 +45,18 @@ class AIAssessment(Base):
     )
 
     # assessment snapshot
-    answers_json = Column(Text, nullable=False)   # serialized answers (JSON as text)
+    answers_json = Column(Text, nullable=False)  # serialized answers (JSON as text)
     risk_tier = Column(String(50), nullable=True)
     prohibited = Column(Boolean, default=False, nullable=False)
     high_risk = Column(Boolean, default=False, nullable=False)
-    obligations_json = Column(Text, nullable=True)  # serialized obligations (JSON as text)
+    obligations_json = Column(
+        Text, nullable=True
+    )  # serialized obligations (JSON as text)
 
     # versioning by time (latest = most recent created_at)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
     # --- NEW (approval mirror on the assessment row) ---
     if ENABLE_APPROVAL_COLUMNS:

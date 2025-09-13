@@ -1,0 +1,6 @@
+# trajne mape (možeš ih staviti u repozitorijsku mapu "storage")
+DOC_STORAGE_DIR=/workspaces/mate_ai/storage/docs
+DOC_PACKS_DIR=/workspaces/mate_ai/storage/packs
+
+# isključi scheduler za v0
+ENABLE_SCHEDULER=0

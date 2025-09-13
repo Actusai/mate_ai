@@ -14,18 +14,22 @@ from app.schemas.invite import InviteCreate
 STAFF_ROLES = {"administrator_stranice", "site_admin", "super_admin"}
 CLIENT_ROLES = {"admin", "member"}  # proširi po potrebi
 
+
 def _generate_token() -> str:
     return uuid4().hex
+
 
 def _get_company(db: Session, company_id: Optional[int]) -> Optional[Company]:
     if company_id is None:
         return None
     return db.query(Company).filter(Company.id == company_id).first()
 
+
 def _get_package(db: Session, package_id: Optional[int]) -> Optional[Package]:
     if package_id is None:
         return None
     return db.query(Package).filter(Package.id == package_id).first()
+
 
 def create_invite(db: Session, payload: InviteCreate) -> Invite:
     """
@@ -73,8 +77,10 @@ def create_invite(db: Session, payload: InviteCreate) -> Invite:
     db.refresh(invite)
     return invite
 
+
 def get_invite_by_token(db: Session, token: str) -> Invite | None:
     return db.query(Invite).filter(Invite.token == token).first()
+
 
 def accept_invite(db: Session, token: str, password: str) -> User:
     invite = get_invite_by_token(db, token)

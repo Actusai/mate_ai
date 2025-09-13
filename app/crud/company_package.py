@@ -2,8 +2,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import exists, and_
 from app.models.company import Company
 from app.models.package import Package
-from app.models.company_package import CompanyPackage  # pretpostavka: model postoji (company_packages)
+from app.models.company_package import (
+    CompanyPackage,
+)  # pretpostavka: model postoji (company_packages)
 from app.schemas.company_package import CompanyPackageAssign
+
 
 def assign_package(db: Session, payload: CompanyPackageAssign) -> CompanyPackage:
     # validacije

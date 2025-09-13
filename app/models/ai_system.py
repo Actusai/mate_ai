@@ -26,10 +26,14 @@ class AISystem(Base):
 
     # osnovna meta polja
     name = Column(String(255), nullable=False, index=True)
-    purpose = Column(Text, nullable=True)                 # opis/namjena sustava
-    lifecycle_stage = Column(String(50), nullable=True)   # npr. "development", "production"
-    risk_tier = Column(String(50), nullable=True)         # npr. "prohibited", "high_risk", "limited_risk", "minimal_risk"
-    status = Column(String(50), nullable=True)            # npr. "active", "paused", "retired"
+    purpose = Column(Text, nullable=True)  # opis/namjena sustava
+    lifecycle_stage = Column(
+        String(50), nullable=True
+    )  # npr. "development", "production"
+    risk_tier = Column(
+        String(50), nullable=True
+    )  # npr. "prohibited", "high_risk", "limited_risk", "minimal_risk"
+    status = Column(String(50), nullable=True)  # npr. "active", "paused", "retired"
 
     # vlasnik sustava
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -46,14 +50,18 @@ class AISystem(Base):
     #   - compliance_status: "unknown" | "compliant" | "partially_compliant" | "non_compliant"
     #   - compliance_score: 0–100 (opcionalno; npr. % ispunjenih obveza)
     #   - compliance_updated_at: kada je zadnji put ažurirano
-    compliance_status = Column(String(30), nullable=False, default="unknown", index=True)
-    compliance_score = Column(Integer, nullable=True)      # 0–100, opcionalno
+    compliance_status = Column(
+        String(30), nullable=False, default="unknown", index=True
+    )
+    compliance_score = Column(Integer, nullable=True)  # 0–100, opcionalno
     compliance_updated_at = Column(DateTime, nullable=True)
 
     notes = Column(Text, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
 
     # relacije
     company = relationship(Company, backref="ai_systems", passive_deletes=True)
@@ -66,7 +74,11 @@ class AISystem(Base):
         # Koristan složeni indeks za listanje/filtriranje po company & compliance
         Index("ix_ai_systems_company_compliance", "company_id", "compliance_status"),
         # Koristan indeks za pretrage po AR-u unutar kompanije
-        Index("ix_ai_systems_company_ar", "company_id", "authorized_representative_user_id"),
+        Index(
+            "ix_ai_systems_company_ar",
+            "company_id",
+            "authorized_representative_user_id",
+        ),
     )
 
     # Pomoćna property: kombinira risk_tier + compliance_status u efektivni rizik

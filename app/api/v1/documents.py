@@ -8,12 +8,24 @@ import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    status,
+    Request,
+    UploadFile,
+    File,
+    Response,
+)
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, text, func
 
 from app.core.auth import get_db, get_current_user
 from app.core.scoping import can_read_company, can_write_company, is_super
+from app.core.rbac import ensure_system_access_read, ensure_system_write_limited
 from app.models.user import User
 from app.models.ai_system import AISystem
 from app.models.document import Document
@@ -26,7 +38,22 @@ try:
 except Exception:
     send_pending_notifications = None  # type: ignore
 
+# Optional readiness view (not required; keep local logic self-contained)
+try:
+    from app.services.compliance import get_ar_readiness  # pragma: no cover
+except Exception:
+    get_ar_readiness = None  # type: ignore
+
+from pydantic import BaseModel, Field
+
 router = APIRouter()
+
+# Where we store uploaded files locally (can be replaced with S3 later)
+DOC_FOLDER = os.environ.get("DOC_STORAGE_DIR", "/var/app/docs")
+DOC_PACKS_DIR = os.environ.get("DOC_PACKS_DIR", os.path.join(DOC_FOLDER, "packs"))
+
+os.makedirs(DOC_FOLDER, exist_ok=True)
+os.makedirs(DOC_PACKS_DIR, exist_ok=True)
 
 
 # -----------------------------
@@ -90,6 +117,320 @@ def _unique_ints(values: Optional[List[int]]) -> List[int]:
         return []
 
 
+def _parse_iso_or_none(s: Optional[str]):
+    if not s:
+        return None
+    try:
+        # Accept both date and datetime (tolerate trailing Z)
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _merge_doc_metadata(doc: Document, updates: Dict[str, Any]) -> None:
+    """
+    Safely merge a partial dict into Document.metadata_json.
+    Preserves existing keys and appends to list fields if needed.
+    """
+    try:
+        current = (
+            json.loads(doc.metadata_json) if getattr(doc, "metadata_json", None) else {}
+        )
+    except Exception:
+        current = {}
+
+    def _deep_merge(a: Any, b: Any) -> Any:
+        if isinstance(a, dict) and isinstance(b, dict):
+            out = dict(a)
+            for k, v in b.items():
+                if k in out:
+                    out[k] = _deep_merge(out[k], v)
+                else:
+                    out[k] = v
+            return out
+        if isinstance(a, list) and isinstance(b, list):
+            return a + b
+        return b
+
+    merged = _deep_merge(current, updates)
+    doc.metadata_json = json.dumps(merged, ensure_ascii=False, separators=(",", ":"))
+
+
+# -----------------------------
+# NEW: Upload a single document
+# -----------------------------
+@router.post(
+    "/documents/upload", response_model=DocumentOut, status_code=status.HTTP_201_CREATED
+)
+async def upload_document(
+    request: Request,  # <-- move first: non-default must come before defaulted params
+    company_id: int = Query(..., ge=1),
+    ai_system_id: Optional[int] = Query(None, ge=1),
+    type: Optional[str] = Query(
+        "evidence", description="Document type, e.g. evidence, policy, report, fria"
+    ),
+    status_v: Optional[str] = Query("active", alias="status"),
+    review_due_at: Optional[str] = Query(
+        None, description="ISO date/time when review is due"
+    ),
+    display_name: Optional[str] = Query(
+        None, description="Human-friendly display name"
+    ),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Upload a document (multipart/form-data).
+    RBAC:
+      - system-scoped → requires at least limited write on that AI system,
+      - company-scoped → requires company-level write.
+    """
+    # RBAC
+    if ai_system_id:
+        # requires at least limited write on the system
+        sys = ensure_system_write_limited(db, current_user, ai_system_id)
+        if sys.company_id != company_id:
+            raise HTTPException(
+                status_code=400, detail="AI system does not belong to the company"
+            )
+    else:
+        if not can_write_company(db, current_user, company_id):
+            raise HTTPException(status_code=403, detail="Insufficient privileges")
+
+    # Persist file to disk
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    base_name = (
+        (display_name or file.filename or "document")
+        .strip()
+        .replace("/", "_")
+        .replace("\\", "_")
+    )
+    fname = f"cid{company_id}_aid{ai_system_id or 0}_{ts}_{base_name}"
+    path = os.path.join(DOC_FOLDER, fname)
+
+    size_bytes = 0
+    try:
+        with open(path, "wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size_bytes += len(chunk)
+                out.write(chunk)
+    finally:
+        await file.close()
+
+    # Parse review_due_at if provided
+    parsed_review_due_at = _parse_iso_or_none(review_due_at)
+
+    # Create DB row
+    doc = Document(
+        company_id=company_id,
+        ai_system_id=ai_system_id,
+        uploaded_by=getattr(current_user, "id", None),
+        name=base_name,
+        storage_url=path,  # local path; consider file:// if you prefer
+        content_type=file.content_type or "application/octet-stream",
+        size_bytes=size_bytes,
+        type=type,
+        status=status_v or "active",
+        review_due_at=parsed_review_due_at,
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    # AUDIT (best-effort)
+    try:
+        audit_log(
+            db,
+            company_id=company_id,
+            user_id=current_user.id,
+            action="DOCUMENT_UPLOADED",
+            entity_type="document",
+            entity_id=doc.id,
+            meta={
+                "ai_system_id": ai_system_id,
+                "name": doc.name,
+                "type": type,
+                "status": status_v,
+                "size_bytes": size_bytes,
+                "content_type": doc.content_type,
+            },
+            ip=ip_from_request(request),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return _doc_to_out(doc)
+
+
+# -----------------------------
+# NEW: List documents (generic)
+# -----------------------------
+@router.get("/documents", response_model=List[DocumentOut])
+def list_documents(
+    company_id: Optional[int] = Query(None, ge=1),
+    ai_system_id: Optional[int] = Query(None, ge=1),
+    type: Optional[str] = Query(
+        None, description="Filter by document type (e.g. fria)"
+    ),
+    status_v: Optional[str] = Query(None, alias="status"),
+    q: Optional[str] = Query(None, description="Substring match on name"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    List documents. Non-super users are automatically scoped to their company.
+    """
+    qry = db.query(Document)
+
+    # RBAC scoping
+    if not is_super(current_user):
+        if company_id is None:
+            company_id = current_user.company_id
+        if not can_read_company(db, current_user, company_id):
+            raise HTTPException(status_code=403, detail="Forbidden")
+    if company_id is not None:
+        qry = qry.filter(Document.company_id == company_id)
+
+    if ai_system_id is not None:
+        # ensure they can read the system
+        ensure_system_access_read(db, current_user, ai_system_id)
+        qry = qry.filter(Document.ai_system_id == ai_system_id)
+
+    if type:
+        qry = qry.filter(Document.type == type)
+    if status_v:
+        qry = qry.filter(Document.status == status_v)
+    if q:
+        # SQLite-friendly ILIKE fallback
+        qry = qry.filter(func.lower(Document.name).like(f"%{q.lower()}%"))
+
+    rows = qry.order_by(Document.id.desc()).offset(skip).limit(limit).all()
+    return [_doc_to_out(r) for r in rows]
+
+
+# -----------------------------
+# NEW: Convenience list by system (alias)
+# -----------------------------
+@router.get("/ai-systems/{system_id}/documents", response_model=List[DocumentOut])
+def list_documents_for_system(
+    system_id: int,
+    type: Optional[str] = Query(
+        None, description="Filter by document type (e.g. fria)"
+    ),
+    status_v: Optional[str] = Query(None, alias="status"),
+    q: Optional[str] = Query(None, description="Substring match on name"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # RBAC read on system
+    ensure_system_access_read(db, current_user, system_id)
+    return list_documents(
+        company_id=None,
+        ai_system_id=system_id,
+        type=type,
+        status_v=status_v,
+        q=q,
+        skip=skip,
+        limit=limit,
+        db=db,
+        current_user=current_user,
+    )
+
+
+# -----------------------------
+# NEW: Download a document
+# -----------------------------
+@router.get("/documents/{document_id}/download")
+def download_document(
+    document_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Download the stored file. Uses storage_url path on disk.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # RBAC
+    if not is_super(current_user) and not can_read_company(
+        db, current_user, doc.company_id
+    ):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not doc.storage_url or not os.path.exists(doc.storage_url):
+        raise HTTPException(status_code=404, detail="Stored file not found")
+
+    # AUDIT (best-effort)
+    try:
+        audit_log(
+            db,
+            company_id=doc.company_id,
+            user_id=current_user.id,
+            action="DOCUMENT_DOWNLOADED",
+            entity_type="document",
+            entity_id=doc.id,
+            meta={"ai_system_id": doc.ai_system_id, "name": doc.name},
+            ip=ip_from_request(request),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return FileResponse(
+        doc.storage_url,
+        media_type=doc.content_type or "application/octet-stream",
+        filename=doc.name or f"document_{doc.id}",
+    )
+
+
+# -----------------------------
+# NEW: Delete a document
+# -----------------------------
+@router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Response:
+    """
+    Delete a document (DB row + stored file).
+    Requires company write (or system write if linked).
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # RBAC: if system-scoped require limited write on that system, else company-level write
+    if doc.ai_system_id:
+        ensure_system_write_limited(db, current_user, doc.ai_system_id)
+    else:
+        if not can_write_company(db, current_user, doc.company_id):
+            raise HTTPException(status_code=403, detail="Insufficient privileges")
+
+    # Remove file from disk if present
+    try:
+        if doc.storage_url and os.path.exists(doc.storage_url):
+            os.remove(doc.storage_url)
+    except Exception:
+        pass
+
+    db.delete(doc)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 # -----------------------------
 # Local fallback: generate "stale evidence" reminders
 # -----------------------------
@@ -123,7 +464,8 @@ def _generate_stale_evidence_reminders(
     created = 0
     for d in docs:
         # duplicate guard via LIKE on payload JSON
-        like_pattern = f'%\"document_id\":{int(d.id)}%'
+        like_pattern = f'%"document_id":{int(d.id)}%'
+
         row = db.execute(
             text(
                 """
@@ -131,7 +473,10 @@ def _generate_stale_evidence_reminders(
                   FROM notifications
                  WHERE type = 'doc_review_due'
                    AND company_id = :cid
-                   AND ai_system_id IS :aid_is_null OR ai_system_id = :aid
+                   AND (
+                        (:aid IS NULL AND ai_system_id IS NULL)
+                     OR (ai_system_id = :aid)
+                   )
                    AND payload LIKE :pattern
                    AND created_at >= datetime('now', :since)
                  LIMIT 1
@@ -139,7 +484,6 @@ def _generate_stale_evidence_reminders(
             ),
             {
                 "cid": int(d.company_id),
-                "aid_is_null": None if d.ai_system_id is None else None,  # keep SQL happy
                 "aid": int(d.ai_system_id) if d.ai_system_id is not None else None,
                 "pattern": like_pattern,
                 "since": f"-{int(duplicate_guard_hours)} hour",
@@ -175,8 +519,12 @@ def _generate_stale_evidence_reminders(
             ),
             {
                 "company_id": int(d.company_id),
-                "ai_system_id": int(d.ai_system_id) if d.ai_system_id is not None else None,
-                "payload": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                "ai_system_id": (
+                    int(d.ai_system_id) if d.ai_system_id is not None else None
+                ),
+                "payload": json.dumps(
+                    payload, ensure_ascii=False, separators=(",", ":")
+                ),
             },
         )
         created += 1
@@ -196,15 +544,19 @@ def _fallback_mark_sent(db: Session, *, for_company_id: Optional[int] = None) ->
         where += " AND company_id = :cid"
         params["cid"] = int(for_company_id)
 
-    rows = db.execute(
-        text(
-            f"""
+    rows = (
+        db.execute(
+            text(
+                f"""
             SELECT id FROM notifications
             WHERE {where}
             """
-        ),
-        params,
-    ).mappings().all()
+            ),
+            params,
+        )
+        .mappings()
+        .all()
+    )
 
     if not rows:
         return 0
@@ -227,7 +579,9 @@ def _fallback_mark_sent(db: Session, *, for_company_id: Optional[int] = None) ->
 # -----------------------------
 # POST /documents/packs – generate ZIP
 # -----------------------------
-@router.post("/documents/packs", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/documents/packs", response_model=DocumentOut, status_code=status.HTTP_201_CREATED
+)
 def create_document_pack(
     request: Request,
     payload: DocumentPackCreate,
@@ -259,7 +613,9 @@ def create_document_pack(
 
     docs: List[Document] = q.order_by(Document.id.asc()).all()
     if not docs:
-        raise HTTPException(status_code=404, detail="No matching documents found to pack")
+        raise HTTPException(
+            status_code=404, detail="No matching documents found to pack"
+        )
 
     # Build ZIP in-memory
     buf = io.BytesIO()
@@ -336,7 +692,8 @@ def create_document_pack(
     size = len(zip_bytes)
 
     # Persist ZIP to disk (simple local storage)
-    folder = "/tmp/doc_packs"
+
+    folder = DOC_PACKS_DIR
     os.makedirs(folder, exist_ok=True)
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     fname = f"doc_pack_aid{system.id}_{ts}.zip"
@@ -422,7 +779,8 @@ def list_document_packs(
         if not can_read_company(db, current_user, system.company_id):
             raise HTTPException(status_code=403, detail="Forbidden")
         q = q.filter(
-            (Document.ai_system_id == system.id) & (Document.company_id == system.company_id)
+            (Document.ai_system_id == system.id)
+            & (Document.company_id == system.company_id)
         )
     else:
         if is_super(current_user):
@@ -465,3 +823,95 @@ def run_review_due_reminders(
         sent = _fallback_mark_sent(db, for_company_id=company_id)
 
     return {"ok": True, "created": created, "sent": sent}
+
+
+# -----------------------------
+# NEW: Send to authority (audit + metadata record)
+# -----------------------------
+class SendToAuthorityBody(BaseModel):
+    authority: Optional[str] = Field(
+        None, description="Recipient authority name (e.g., AI Office, DPA)"
+    )
+    channel: Optional[str] = Field(
+        "email", description="Transport channel (email|portal|api)"
+    )
+    reference: Optional[str] = Field(
+        None, description="External reference / tracking id"
+    )
+    note: Optional[str] = Field(None, description="Optional note")
+    sent_at: Optional[str] = Field(
+        None, description="ISO timestamp; defaults to now() if missing"
+    )
+    extra: Optional[Dict[str, Any]] = Field(
+        None, description="Any additional structured fields"
+    )
+
+
+@router.post("/documents/{document_id}/send-to-authority", response_model=DocumentOut)
+def send_to_authority(
+    document_id: int,
+    payload: SendToAuthorityBody,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> DocumentOut:
+    """
+    Records a transmission of this document to a competent authority.
+    - Appends a record to metadata_json.transmissions[]
+    - AUDIT action: DOC_SENT
+    - Returns the updated document
+    RBAC: requires system-limited write if system-scoped, otherwise company write.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # RBAC
+    if doc.ai_system_id:
+        ensure_system_write_limited(db, current_user, int(doc.ai_system_id))
+    else:
+        if not can_write_company(db, current_user, int(doc.company_id)):
+            raise HTTPException(status_code=403, detail="Insufficient privileges")
+
+    # Prepare transmission record
+    when = payload.sent_at or (datetime.utcnow().isoformat() + "Z")
+    transmission = {
+        "authority": payload.authority or "unknown",
+        "channel": payload.channel or "email",
+        "reference": payload.reference,
+        "note": payload.note,
+        "sent_at": when,
+        "user_id": getattr(current_user, "id", None),
+        "extra": payload.extra or {},
+    }
+
+    # Merge into metadata_json
+    _merge_doc_metadata(doc, {"transmissions": [transmission], "last_sent_at": when})
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    # AUDIT (best-effort)
+    try:
+        audit_log(
+            db,
+            company_id=int(doc.company_id),
+            user_id=getattr(current_user, "id", None),
+            action="DOC_SENT",
+            entity_type="document",
+            entity_id=int(doc.id),
+            meta={
+                "ai_system_id": doc.ai_system_id,
+                "authority": transmission["authority"],
+                "channel": transmission["channel"],
+                "reference": transmission["reference"],
+                "note": transmission["note"],
+                "sent_at": transmission["sent_at"],
+            },
+            ip=ip_from_request(request),
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    return _doc_to_out(doc)

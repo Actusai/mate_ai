@@ -24,6 +24,7 @@ class Incident(Base):
     - Foreign keys are intentionally NOT declared here (to avoid boot-time FK ordering issues).
       We will add proper FK constraints via Alembic once migrations are in place.
     """
+
     __tablename__ = "incidents"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -52,7 +53,9 @@ class Incident(Base):
 
     # Audit
     created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    updated_at = Column(
+        DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
     def __repr__(self) -> str:
         return (

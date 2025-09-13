@@ -57,7 +57,9 @@ def reset_password(db: Session, token: str, new_password: str) -> None:
     db.commit()
 
 
-def change_password(db: Session, user: User, current_password: str, new_password: str) -> None:
+def change_password(
+    db: Session, user: User, current_password: str, new_password: str
+) -> None:
     if not verify_password(current_password, user.hashed_password):
         raise ValueError("Current password is incorrect")
     user.hashed_password = get_password_hash(new_password)

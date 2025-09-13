@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime
 from datetime import datetime
 from app.db.base import Base
 
+
 class Company(Base):
     __tablename__ = "companies"
 
@@ -14,7 +15,7 @@ class Company(Base):
 
     # napomena: u bazi postoji "email" i "contact_email"
     # preferiramo contact_email, ali ostavljamo i email radi kompatibilnosti
-    email = Column(String, nullable=True)              # (legacy / optional)
+    email = Column(String, nullable=True)  # (legacy / optional)
     contact_email = Column(String, nullable=True)
 
     contact_phone = Column(String, nullable=True)
@@ -23,7 +24,7 @@ class Company(Base):
     legal_form = Column(String, nullable=True)
     registration_number = Column(String, nullable=True, index=True)
     website = Column(String, nullable=True)
-    
+
     # --- ISPRAVLJENO: Dodana kolona 'company_type' ---
     company_type = Column(String, nullable=True)
     # ------------------------------------------------
@@ -33,4 +34,6 @@ class Company(Base):
 
     # timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )

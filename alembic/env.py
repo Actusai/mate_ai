@@ -11,6 +11,13 @@ cwd = os.getcwd()
 if cwd not in sys.path:
     sys.path.insert(0, cwd)
 
+# Load .env so DATABASE_URL and other vars are available when running Alembic
+try:
+    from dotenv import load_dotenv  # type: ignore
+    load_dotenv()
+except Exception:
+    pass
+
 # Alembic Config object
 config = context.config
 
@@ -18,10 +25,26 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# --- Use the same engine as the application ---
-from app.db.session import engine  # must exist
+# --- Reuse the same engine URL as the application, with a safe fallback ---
+engine = None
+try:
+    from app.db.session import engine as app_engine  # must exist in app runtime
+    engine = app_engine
+except Exception:
+    # Fallback to avoid hard crash if session export changes
+    from sqlalchemy import create_engine
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
+    connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+    engine = create_engine(DATABASE_URL, connect_args=connect_args)
 
-# Import model modules so their Base.metadata is populated
+# Ensure alembic has the same URL even in offline mode
+try:
+    config.set_main_option("sqlalchemy.url", str(engine.url))
+except Exception:
+    pass
+
+# --- Import model modules so their Base.metadata is populated ---------------
+# Core models (order matters due to FKs)
 from app.models import (
     user,
     company,
@@ -33,45 +56,64 @@ from app.models import (
     admin_assignment,
     system_assignment,
     ai_assessment,
-    task_stats,
-    compliance_task,
-    notification,
-    document,   # documents model
-    # NOTE: audit_logs table is written via raw SQL service;
-    # it may not have an ORM model on purpose → we protect it below.
 )
+
+_core_modules = [
+    user,
+    company,
+    package,
+    company_package,
+    invite,
+    password_reset,
+    ai_system,
+    admin_assignment,
+    system_assignment,
+    ai_assessment,
+]
+
+# Optional models (import safely; skip if missing)
+_optional_names = (
+    "task_stats",
+    "compliance_task",
+    "notification",
+    "document",
+    "incident",
+    "assessment_approval",
+    "regulatory_deadline",
+    "calendar_pin",  # ← added
+)
+
+_optional_modules = []
+for _name in _optional_names:
+    try:
+        _mod = __import__(f"app.models.{_name}", fromlist=["Base"])
+        _optional_modules.append(_mod)
+    except Exception:
+        pass
 
 def _combine_metadata() -> MetaData:
     """
     Merge all per-module Base.metadata into a single MetaData for autogenerate.
     """
-    metas = [
-        user.Base.metadata,
-        company.Base.metadata,
-        package.Base.metadata,
-        company_package.Base.metadata,
-        invite.Base.metadata,
-        password_reset.Base.metadata,
-        ai_system.Base.metadata,
-        admin_assignment.Base.metadata,
-        system_assignment.Base.metadata,
-        ai_assessment.Base.metadata,
-        task_stats.Base.metadata,
-        compliance_task.Base.metadata,
-        notification.Base.metadata,
-        document.Base.metadata,
-    ]
     combined = MetaData()
-    for m in metas:
-        for t in m.tables.values():
-            # copy Table definition into combined metadata
-            t.tometadata(combined)
+
+    def _copy_tables(md):
+        # SQLAlchemy 1.4 uses tometadata; 2.0 uses to_metadata
+        for t in md.tables.values():
+            try:
+                t.to_metadata(combined)
+            except AttributeError:
+                t.tometadata(combined)
+
+    for m in _core_modules + _optional_modules:
+        try:
+            _copy_tables(m.Base.metadata)
+        except Exception:
+            continue
+
     return combined
 
 target_metadata = _combine_metadata()
-
-# Ensure alembic has the same URL even in offline mode
-config.set_main_option("sqlalchemy.url", str(engine.url))
 
 def _is_sqlite() -> bool:
     try:

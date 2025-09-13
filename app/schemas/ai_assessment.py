@@ -18,6 +18,7 @@ class AIAssessmentCreate(BaseModel):
     - version_tag: optional label (e.g., 'v1', 'Q3-2025')
     - save: if True, the endpoint will persist the version
     """
+
     answers: RiskAssessmentAnswer
     version_tag: Optional[constr(strip_whitespace=True, max_length=50)] = None
     save: bool = True
@@ -31,15 +32,16 @@ class AIAssessmentOut(BaseModel):
     One assessment version returned by the API.
     Fields align with risk_engine output + version metadata.
     """
+
     id: int
     system_id: int
     company_id: int
 
     # classification result
     risk_tier: constr(strip_whitespace=True, to_lower=True, min_length=3, max_length=20)
-    obligations: Dict[str, List[str]]              # e.g. {"core": [...], "situational": [...]}
-    rationale: List[str]                           # reasons for tier
-    references: List[str] = []                     # short references (e.g. "Art. 9–15", "Art. 52")
+    obligations: Dict[str, List[str]]  # e.g. {"core": [...], "situational": [...]}
+    rationale: List[str]  # reasons for tier
+    references: List[str] = []  # short references (e.g. "Art. 9–15", "Art. 52")
 
     # snapshot of inputs
     answers: RiskAssessmentAnswer
@@ -62,6 +64,7 @@ class AIAssessmentListItem(BaseModel):
     """
     Slim list item representation (used in paginated lists).
     """
+
     id: int
     system_id: int
     risk_tier: str
@@ -82,6 +85,7 @@ class AIAssessmentDetail(BaseModel):
     """
     Detailed view of one version (alternative to AIAssessmentOut).
     """
+
     id: int
     system_id: int
     company_id: int

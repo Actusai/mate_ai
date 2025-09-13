@@ -66,6 +66,7 @@ class DocumentPackCreate(BaseModel):
     Request body to generate a ZIP pack out of existing documents.
     You can select by explicit document IDs and/or by types.
     """
+
     ai_system_id: conint(ge=1)
     document_ids: Optional[List[conint(ge=1)]] = Field(
         default=None, description="Explicit document IDs to include"

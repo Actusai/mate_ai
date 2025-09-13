@@ -8,19 +8,32 @@ from app.models.company import Company
 
 ALLOWED_ADMIN_ROLES = {"admin", "administrator_stranice", "site_admin"}
 
+
 def list_all(db: Session) -> List[AdminAssignment]:
     return db.query(AdminAssignment).order_by(AdminAssignment.id.desc()).all()
 
+
 def list_by_company(db: Session, company_id: int) -> List[AdminAssignment]:
-    return db.query(AdminAssignment).filter(AdminAssignment.company_id == company_id) \
-        .order_by(AdminAssignment.id.desc()).all()
+    return (
+        db.query(AdminAssignment)
+        .filter(AdminAssignment.company_id == company_id)
+        .order_by(AdminAssignment.id.desc())
+        .all()
+    )
+
 
 def list_by_admin(db: Session, admin_user_id: int) -> List[AdminAssignment]:
-    return db.query(AdminAssignment).filter(AdminAssignment.admin_id == admin_user_id) \
-        .order_by(AdminAssignment.id.desc()).all()
+    return (
+        db.query(AdminAssignment)
+        .filter(AdminAssignment.admin_id == admin_user_id)
+        .order_by(AdminAssignment.id.desc())
+        .all()
+    )
+
 
 def get(db: Session, assignment_id: int) -> Optional[AdminAssignment]:
     return db.query(AdminAssignment).filter(AdminAssignment.id == assignment_id).first()
+
 
 def create(db: Session, admin_user_id: int, company_id: int) -> AdminAssignment:
     # validate admin user
@@ -36,10 +49,14 @@ def create(db: Session, admin_user_id: int, company_id: int) -> AdminAssignment:
         raise ValueError("Company not found")
 
     # idempotent upsert-like: return existing if present
-    existing = db.query(AdminAssignment).filter(
-        AdminAssignment.admin_id == admin_user_id,
-        AdminAssignment.company_id == company_id
-    ).first()
+    existing = (
+        db.query(AdminAssignment)
+        .filter(
+            AdminAssignment.admin_id == admin_user_id,
+            AdminAssignment.company_id == company_id,
+        )
+        .first()
+    )
     if existing:
         return existing
 
@@ -48,6 +65,7 @@ def create(db: Session, admin_user_id: int, company_id: int) -> AdminAssignment:
     db.commit()
     db.refresh(obj)
     return obj
+
 
 def delete(db: Session, assignment: AdminAssignment) -> None:
     db.delete(assignment)

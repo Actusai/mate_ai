@@ -1,6 +1,7 @@
 # app/services/compliance_tasks.py
 from typing import Iterable
 
+
 def derive_compliance_status_from_tasks(tasks: Iterable[dict | object]) -> str:
     """
     Ulaz: kolekcija taskova (dict s .get ili ORM objekt s .status, .mandatory).
@@ -13,10 +14,15 @@ def derive_compliance_status_from_tasks(tasks: Iterable[dict | object]) -> str:
     any_overdue = False
 
     from datetime import datetime, timezone
+
     now = datetime.utcnow()
 
     for t in tasks:
-        status = (getattr(t, "status", None) or getattr(t, "get", lambda *_: None)("status") or "").lower()
+        status = (
+            getattr(t, "status", None)
+            or getattr(t, "get", lambda *_: None)("status")
+            or ""
+        ).lower()
         mandatory = getattr(t, "mandatory", None)
         if mandatory is None and hasattr(t, "get"):
             mandatory = t.get("mandatory")

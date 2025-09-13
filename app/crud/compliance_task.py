@@ -17,7 +17,7 @@ def list_tasks_by_system(
     status: Optional[str] = None,
     severity: Optional[str] = None,
     owner_user_id: Optional[int] = None,
-    reference: Optional[str] = None,   # partial, case-insensitive
+    reference: Optional[str] = None,  # partial, case-insensitive
     skip: int = 0,
     limit: int = 50,
     sort_by: str = "due_date",
@@ -56,15 +56,12 @@ def list_tasks_by_system(
     if ord_lower == "desc":
         sort_col = sort_col.desc()
     # Stabilno sortiranje: tie-breaker po id
-    return (
-        q.order_by(sort_col, ComplianceTask.id.asc())
-         .offset(skip)
-         .limit(limit)
-         .all()
-    )
+    return q.order_by(sort_col, ComplianceTask.id.asc()).offset(skip).limit(limit).all()
 
 
-def create_task(db: Session, payload: ComplianceTaskCreate, user_id: Optional[int] = None) -> ComplianceTask:
+def create_task(
+    db: Session, payload: ComplianceTaskCreate, user_id: Optional[int] = None
+) -> ComplianceTask:
     obj = ComplianceTask(
         company_id=payload.company_id,
         ai_system_id=payload.ai_system_id,
@@ -94,7 +91,12 @@ def create_task(db: Session, payload: ComplianceTaskCreate, user_id: Optional[in
     return obj
 
 
-def update_task(db: Session, obj: ComplianceTask, payload: ComplianceTaskUpdate, user_id: Optional[int] = None) -> ComplianceTask:
+def update_task(
+    db: Session,
+    obj: ComplianceTask,
+    payload: ComplianceTaskUpdate,
+    user_id: Optional[int] = None,
+) -> ComplianceTask:
     data = payload.model_dump(exclude_unset=True)
 
     old_status = obj.status

@@ -19,6 +19,7 @@ from app.services.risk_engine import classify_ai_system
 # Helpers
 # ------------------------
 
+
 def _to_json(obj: Any) -> str:
     try:
         return json.dumps(obj, ensure_ascii=False)
@@ -83,7 +84,7 @@ def _row_to_out(row: AIAssessment) -> AIAssessmentOut:
 
     return AIAssessmentOut(
         id=row.id,
-        system_id=row.ai_system_id,   # točan naziv stupca
+        system_id=row.ai_system_id,  # točan naziv stupca
         company_id=row.company_id,
         risk_tier=row.risk_tier or "minimal_risk",
         obligations=obligations,
@@ -99,6 +100,7 @@ def _row_to_out(row: AIAssessment) -> AIAssessmentOut:
 # ------------------------
 # READ (latest / list / legacy single)
 # ------------------------
+
 
 def get_latest_for_system(db: Session, system_id: int) -> Optional[AIAssessment]:
     return (
@@ -126,8 +128,8 @@ def list_versions_for_system(
     system_id: int,
     skip: int = 0,
     limit: int = 50,
-    sort_by: str = "created_at",   # supports: created_at | id
-    order: str = "desc",           # asc | desc
+    sort_by: str = "created_at",  # supports: created_at | id
+    order: str = "desc",  # asc | desc
 ) -> List[AIAssessment]:
     q = db.query(AIAssessment).filter(AIAssessment.ai_system_id == system_id)
 
@@ -153,6 +155,7 @@ def get_by_system(db: Session, system_id: int) -> Optional[AIAssessment]:
 # ------------------------
 # WRITE (versioned save) + legacy upsert
 # ------------------------
+
 
 def create_version_for_system(
     db: Session,
@@ -206,7 +209,9 @@ def upsert_version_for_system(
     return create_version_for_system(db, system, payload, created_by)
 
 
-def upsert_for_system(db: Session, system: AISystem, payload: AIAssessmentCreate) -> AIAssessment:
+def upsert_for_system(
+    db: Session, system: AISystem, payload: AIAssessmentCreate
+) -> AIAssessment:
     """
     Legacy: čuva točno jedan zapis po sustavu (update ako postoji, inače insert).
     Ostavili smo zbog kompatibilnosti starog endpointa.
@@ -244,8 +249,8 @@ def upsert_for_system(db: Session, system: AISystem, payload: AIAssessmentCreate
     else:
         row.answers_json = _to_json(answers_dict)
         row.risk_tier = risk_tier
-        row.prohibited = (risk_tier == "prohibited")
-        row.high_risk = (risk_tier == "high_risk")
+        row.prohibited = risk_tier == "prohibited"
+        row.high_risk = risk_tier == "high_risk"
         row.obligations_json = _to_json(obligations_obj)
         if hasattr(row, "rationale_json"):
             row.rationale_json = _to_json(rationale)
@@ -262,6 +267,7 @@ def upsert_for_system(db: Session, system: AISystem, payload: AIAssessmentCreate
 # ------------------------
 # OUT converters
 # ------------------------
+
 
 def to_out(row: AIAssessment) -> AIAssessmentOut:
     return _row_to_out(row)

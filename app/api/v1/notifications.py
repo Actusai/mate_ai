@@ -37,17 +37,28 @@ def _ensure_superadmin(user: User) -> None:
 # -----------------------------
 @router.get("")
 def list_notifications(
-    type: Optional[List[str]] = Query(None, description="Filter by notification type (repeatable)"),
-    status: Optional[List[str]] = Query(None, description="Filter by status (queued|sent|failed; repeatable)"),
+    type: Optional[List[str]] = Query(
+        None, description="Filter by notification type (repeatable)"
+    ),
+    status: Optional[List[str]] = Query(
+        None, description="Filter by status (queued|sent|failed; repeatable)"
+    ),
     ai_system_id: Optional[int] = Query(None, ge=1),
     company_id: Optional[int] = Query(
         None,
         ge=1,
         description="Super Admin only: view notifications for a specific company",
     ),
-    mine_only: bool = Query(False, description="If true (non-super), return only notifications addressed to the current user_id"),
-    created_from: Optional[str] = Query(None, description="ISO date/datetime lower bound for created_at"),
-    created_to: Optional[str] = Query(None, description="ISO date/datetime upper bound for created_at"),
+    mine_only: bool = Query(
+        False,
+        description="If true (non-super), return only notifications addressed to the current user_id",
+    ),
+    created_from: Optional[str] = Query(
+        None, description="ISO date/datetime lower bound for created_at"
+    ),
+    created_to: Optional[str] = Query(
+        None, description="ISO date/datetime upper bound for created_at"
+    ),
     order_by: str = Query("created_at", pattern="^(id|created_at|sent_at)$"),
     order_dir: str = Query("desc", pattern="^(?i)(asc|desc)$"),
     limit: int = Query(100, ge=1, le=1000),
@@ -112,13 +123,21 @@ def list_notifications(
     """
 
     # Count
-    cnt_row = db.execute(text(f"SELECT COUNT(1) AS c FROM notifications {where}"), params).mappings().first()
+    cnt_row = (
+        db.execute(text(f"SELECT COUNT(1) AS c FROM notifications {where}"), params)
+        .mappings()
+        .first()
+    )
     total = int(cnt_row["c"] if cnt_row and "c" in cnt_row else 0)
 
-    rows = db.execute(
-        text(f"{base_select} {where} ORDER BY {order} LIMIT :lim OFFSET :off"),
-        {**params, "lim": limit, "off": offset},
-    ).mappings().all()
+    rows = (
+        db.execute(
+            text(f"{base_select} {where} ORDER BY {order} LIMIT :lim OFFSET :off"),
+            {**params, "lim": limit, "off": offset},
+        )
+        .mappings()
+        .all()
+    )
 
     def _coerce_payload(v: Any) -> Any:
         if v is None:
@@ -149,17 +168,21 @@ def get_notification(
     """
     Fetch a single notification by ID (scoped to the user's company unless Super Admin).
     """
-    row = db.execute(
-        text(
-            """
+    row = (
+        db.execute(
+            text(
+                """
             SELECT id, company_id, user_id, ai_system_id, task_id,
                    type, channel, status, error, payload, scheduled_at, sent_at, created_at
             FROM notifications
             WHERE id = :nid
             """
-        ),
-        {"nid": notification_id},
-    ).mappings().first()
+            ),
+            {"nid": notification_id},
+        )
+        .mappings()
+        .first()
+    )
 
     if not row:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -181,7 +204,9 @@ def get_notification(
 # -----------------------------
 @router.post("/admin/run-deadline-reminders")
 def admin_run_deadline_reminders(
-    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
+    company_id: Optional[int] = Query(
+        None, ge=1, description="Limit to a single company"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
@@ -207,7 +232,9 @@ def admin_run_deadline_reminders(
 
 @router.post("/admin/run-task-reminders")
 def admin_run_task_reminders(
-    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
+    company_id: Optional[int] = Query(
+        None, ge=1, description="Limit to a single company"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
@@ -224,7 +251,9 @@ def admin_run_task_reminders(
 
 @router.post("/admin/run-stale-evidence-reminders")
 def admin_run_stale_evidence_reminders(
-    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
+    company_id: Optional[int] = Query(
+        None, ge=1, description="Limit to a single company"
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
@@ -244,8 +273,15 @@ def admin_run_stale_evidence_reminders(
 # -----------------------------
 @router.post("/admin/run-cycle")
 def admin_run_all_notifications_cycle(
-    company_id: Optional[int] = Query(None, ge=1, description="Limit to a single company"),
-    scan_hours: int = Query(24, ge=1, le=168, description="Window for scanning new assessment versions/incidents"),
+    company_id: Optional[int] = Query(
+        None, ge=1, description="Limit to a single company"
+    ),
+    scan_hours: int = Query(
+        24,
+        ge=1,
+        le=168,
+        description="Window for scanning new assessment versions/incidents",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:

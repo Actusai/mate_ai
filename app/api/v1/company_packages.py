@@ -10,9 +10,11 @@ from pydantic import BaseModel, Field, conint
 
 router = APIRouter()
 
+
 class CompanyPackageAssign(BaseModel):
     company_id: conint(ge=1)
     package_id: conint(ge=1)
+
 
 class CompanyPackageOut(BaseModel):
     company_id: int
@@ -21,10 +23,17 @@ class CompanyPackageOut(BaseModel):
     class Config:
         from_attributes = True
 
-@router.post("/company-packages", response_model=CompanyPackageOut, status_code=status.HTTP_201_CREATED)
-def assign_package(payload: CompanyPackageAssign,
-                   db: Session = Depends(get_db),
-                   current_user = Depends(get_current_user)):
+
+@router.post(
+    "/company-packages",
+    response_model=CompanyPackageOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def assign_package(
+    payload: CompanyPackageAssign,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
     if not is_super(current_user):
         raise HTTPException(status_code=403, detail="Insufficient privileges")
 
@@ -37,13 +46,17 @@ def assign_package(payload: CompanyPackageAssign,
         raise HTTPException(status_code=404, detail="Package not found")
 
     # upsert-style: jedna kompanija → jedan aktivni package zapis
-    existing = db.query(CompanyPackage).filter(CompanyPackage.company_id == company.id).first()
+    existing = (
+        db.query(CompanyPackage).filter(CompanyPackage.company_id == company.id).first()
+    )
     if existing:
         existing.package_id = package.id
         db.add(existing)
         db.commit()
         db.refresh(existing)
-        return CompanyPackageOut(company_id=existing.company_id, package_id=existing.package_id)
+        return CompanyPackageOut(
+            company_id=existing.company_id, package_id=existing.package_id
+        )
 
     link = CompanyPackage(company_id=company.id, package_id=package.id)
     db.add(link)

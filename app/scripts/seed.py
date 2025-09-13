@@ -27,7 +27,11 @@ def _get_or_create_company(db, name: str) -> Company:
 
 
 def _get_or_create_user(
-    db, email: str, company: Company = None, role: str = "admin", password: str = "ChangeMe123!"
+    db,
+    email: str,
+    company: Company = None,
+    role: str = "admin",
+    password: str = "ChangeMe123!",
 ) -> User:
     u = db.query(User).filter(User.email == email).first()
     if u:
@@ -52,9 +56,15 @@ def run():
     globex = _get_or_create_company(db, "Globex")
 
     # Admins & staff
-    admin1 = _get_or_create_user(db, "admin@acme.test", acme, role="admin", password="AdminPass123")
-    staff1 = _get_or_create_user(db, "staff@acme.test", acme, role="staff", password="StaffPass123")
-    client1 = _get_or_create_user(db, "admin@globex.test", globex, role="admin", password="GlobexPass123")
+    admin1 = _get_or_create_user(
+        db, "admin@acme.test", acme, role="admin", password="AdminPass123"
+    )
+    staff1 = _get_or_create_user(
+        db, "staff@acme.test", acme, role="staff", password="StaffPass123"
+    )
+    client1 = _get_or_create_user(
+        db, "admin@globex.test", globex, role="admin", password="GlobexPass123"
+    )
 
     # Super admin (global, bez company_id)
     super_admin = _get_or_create_user(
