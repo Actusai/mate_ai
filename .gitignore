@@ -25,3 +25,7 @@ app/.env.local
 # coverage
 .coverage
 htmlcov/
+
+# Local env files
+.env
+app/.env
